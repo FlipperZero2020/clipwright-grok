@@ -1,0 +1,32 @@
+{
+  "_comment": "Rotation state for the hourly GIF series. Each run picks the first pending subject, researches them in graphiti, builds a GIF, then moves them to done.",
+  "done": [
+    {"subject": "Justin",        "group": "benchod_tg", "style": "ballad",  "file": "justin_ballad_of_topo_chino.gif",   "topic": "the unicycle / FEMA"},
+    {"subject": "Justin",        "group": "benchod_tg", "style": "ballad",  "file": "justin_02_except_an_acomp.gif",     "topic": "ACOMP / Singapore"},
+    {"subject": "Tyler Quinlan", "group": "weir_tg",    "style": "tabloid", "file": "tyler_01_quinlan_enquirer.gif",     "topic": "the Trudeau claim"},
+    {"subject": "Devin",        "group": "benchod_tg", "style": "ballad",  "file": "devin_01_always_leaves_again.gif",  "topic": "Winnipeg / double-dip FEMA+State Farm claim / n8n job hunt"},
+    {"subject": "Alex",         "group": "benchod_tg", "style": "tabloid", "file": "alex_01_raymond_register.gif",      "topic": "5 billion AI tokens / $2,500-a-month bill / knee pads, no skates"},
+    {"subject": "Kameron",      "group": "benchod_tg", "style": "ballad",  "file": "kameron_01_friendship_ended.gif",   "topic": "ACOMP -> ARGEN meme / ARGEN as vaping codename / quitting nicotine"},
+    {"subject": "Joseph",       "group": "benchod_tg", "style": "tabloid", "file": "joseph_01_the_journal.gif",         "topic": "interviewed a North Korean scammer / scam-baiting hobby / Fluencer award"},
+    {"subject": "Aaron Bidart", "group": "weir_tg",    "style": "ballad",  "file": "aaron_01_the_humidity.gif",         "topic": "relocated to Houston for the humidity / avoids Anthropic's servers for clients but not for himself"},
+    {"subject": "Ben",          "group": "benchod_tg", "style": "tabloid", "file": "ben_01_pho_ben_times.gif",          "topic": "left in 2024, group still says 'act like ben never left' / his namesake bot runs on a lost API key"}
+  ],
+  "pending": [
+    {"subject": "Guru",        "group": "weir_tg",    "facts": 14,  "note": "only non-North-American timezone; airport screening bit"},
+    {"subject": "Jeff Nemish", "group": "weir_tg",    "facts": 14,  "note": "girlfriend since ~March 2025"},
+    {"subject": "Arun",        "group": "weir_tg",    "facts": 14,  "note": "wife in contact with Breanna re: Houston"},
+    {"subject": "Maria",       "group": "benchod_tg", "facts": 13,  "note": "deep in the ACOMP after Ben left"},
+    {"subject": "Bryan Powell", "group": "weir_tg",   "facts": 7,   "note": "thin — camper solar setup, Big_D_B, P.Eng in 2023"}
+  ],
+  "styles": {
+    "ballad": "ballad_kit.py — dark 640x640, 5 scenes: title/chat/document/dossier/counter",
+    "tabloid": "tabloid_kit.py — 600x780 newsprint front page that assembles, then STOP PRESS (generalized from tyler_01_enquirer.py; see alex_01_register.py for usage)"
+  },
+  "rules": [
+    "Every headline and pull-quote must be verbatim from the graph — never invent a fact.",
+    "Verify source quotes; graphiti's entity summaries contain extraction errors.",
+    "Skip anything that could actually harm the subject (confidential-data handling, misconduct, health, immigration risk).",
+    "Do not name private third parties who are unnamed in the graph.",
+    "Vary the visual style; do not reuse the same format for two subjects in a row."
+  ]
+}
