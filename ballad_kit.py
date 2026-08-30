@@ -113,7 +113,7 @@ class Ballad:
     # ── scene 3 · document ───────────────────────────────────────────────────
     def document(self, brand, sub, lede, rows, quote, verdict):
         def stamp_img(text, scale):
-            base = 34 if len(text) <= 8 else max(16, int(34 * 8 / len(text)))
+            base = 34 if len(text) <= 6 else max(16, int(34 * 6 / len(text)))
             fs = max(8, int(base * scale))
             ff = font(fs, True)
             probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))

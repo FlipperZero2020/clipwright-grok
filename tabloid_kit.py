@@ -151,11 +151,15 @@ class Tabloid:
             _starburst(img, self.starburst_lines, cx, cy + shift, 56, (t - sbase) / .6)
             d = ImageDraw.Draw(img)
 
+        n_strips = len(self.strips)
+        footer_top = H - 92
+        available = footer_top - (492 + shift) - 46 - 12  # 12px breathing room above the footer
+        gap = min(58, max(40, available / max(1, n_strips - 1))) if n_strips > 1 else 58
         for i, (tag, quote) in enumerate(self.strips):
             base = sbase + .4 + i * .35
             if t > base:
                 p = ease(clamp((t - base) / .35))
-                y = 492 + shift + i * 58
+                y = 492 + shift + i * gap
                 x0 = int(46 - 400 * (1 - p))
                 tagf = fa(11)
                 tagw = max(78, int(probe.textlength(tag, font=tagf)) + 22)

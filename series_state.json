@@ -9,15 +9,15 @@
     {"subject": "Kameron",      "group": "benchod_tg", "style": "ballad",  "file": "kameron_01_friendship_ended.gif",   "topic": "ACOMP -> ARGEN meme / ARGEN as vaping codename / quitting nicotine"},
     {"subject": "Joseph",       "group": "benchod_tg", "style": "tabloid", "file": "joseph_01_the_journal.gif",         "topic": "interviewed a North Korean scammer / scam-baiting hobby / Fluencer award"},
     {"subject": "Aaron Bidart", "group": "weir_tg",    "style": "ballad",  "file": "aaron_01_the_humidity.gif",         "topic": "relocated to Houston for the humidity / avoids Anthropic's servers for clients but not for himself"},
-    {"subject": "Ben",          "group": "benchod_tg", "style": "tabloid", "file": "ben_01_pho_ben_times.gif",          "topic": "left in 2024, group still says 'act like ben never left' / his namesake bot runs on a lost API key"}
+    {"subject": "Ben",          "group": "benchod_tg", "style": "tabloid", "file": "ben_01_pho_ben_times.gif",          "topic": "left in 2024, group still says 'act like ben never left' / his namesake bot runs on a lost API key"},
+    {"subject": "Guru",         "group": "weir_tg",    "style": "ballad",  "file": "guru_01_just_me_i_think.gif",       "topic": "only non-North-American timezone / India's week-long Telegram ban / airport-screening self-own"},
+    {"subject": "Jeff Nemish",  "group": "weir_tg",    "style": "tabloid", "file": "jeff_01_unity_gazette.gif",         "topic": "concentrated stock portfolio incl. AMD +100% / lives in Unity, SK / APEGA->APEGS"},
+    {"subject": "Arun",         "group": "weir_tg",    "style": "ballad",  "file": "arun_01_at_least_6_7.gif",          "topic": "surrounded by 6-7 chemical plants on his commute / CRA moving advice / no snow regrets"},
+    {"subject": "Maria",        "group": "benchod_tg", "style": "tabloid", "file": "maria_01_shop_floor_bulletin.gif",  "topic": "head deep in the ACOMP after Ben left / gatekeeper of the Ben Chod Ski group chat"},
+    {"subject": "Bryan Powell", "group": "weir_tg",    "style": "ballad",  "file": "bryan_01_8_years.gif",              "topic": "8 years to get his P.Eng / swapped a Calgary trip for Hawaii / ~3,000 missed messages / camper off-grid setup"},
+    {"subject": "Alex",         "group": "benchod_tg", "style": "tabloid", "file": "alex_02_memory_leak.gif",           "topic": "self-hosted a graphiti memory graph on his pst/email/TG data / MCP tools boil down to search_memory_facts 80% of the time / said his app 'has ones' and never finished explaining"}
   ],
-  "pending": [
-    {"subject": "Guru",        "group": "weir_tg",    "facts": 14,  "note": "only non-North-American timezone; airport screening bit"},
-    {"subject": "Jeff Nemish", "group": "weir_tg",    "facts": 14,  "note": "girlfriend since ~March 2025"},
-    {"subject": "Arun",        "group": "weir_tg",    "facts": 14,  "note": "wife in contact with Breanna re: Houston"},
-    {"subject": "Maria",       "group": "benchod_tg", "facts": 13,  "note": "deep in the ACOMP after Ben left"},
-    {"subject": "Bryan Powell", "group": "weir_tg",   "facts": 7,   "note": "thin — camper solar setup, Big_D_B, P.Eng in 2023"}
-  ],
+  "pending": [],
   "styles": {
     "ballad": "ballad_kit.py — dark 640x640, 5 scenes: title/chat/document/dossier/counter",
     "tabloid": "tabloid_kit.py — 600x780 newsprint front page that assembles, then STOP PRESS (generalized from tyler_01_enquirer.py; see alex_01_register.py for usage)"
