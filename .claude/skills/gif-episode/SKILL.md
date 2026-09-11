@@ -1,6 +1,6 @@
 ---
 name: gif-episode
-description: Builds a new episode of the CLIPWRIGHT_PLAN gag GIF series — a satirical newsprint "tabloid" or dark 5-scene "ballad" animated GIF about someone in the user's benchod_tg or weir_tg group chats, made entirely from their own real, verbatim quotes. Use this whenever the user asks to make, build, render, or ship a GIF/meme/tabloid/"episode" about a coworker in this project, asks to "do the next one" or advance the series, or pastes a chat excerpt/screenshot and asks for a gif version of it — even if they don't say the word "skill" or name a file format. Also use when the user asks what's next in the queue, wants to check series_state.json, or references a past episode by name (e.g. "alex_01", "the memory leak one", "make a graphs one").
+description: Builds a new episode of the CLIPWRIGHT_PLAN gag GIF series — a satirical newsprint "tabloid", dark 5-scene "ballad", or memegen-templated "meme" animated GIF about someone in the user's benchod_tg or weir_tg group chats, made entirely from their own real, verbatim quotes. Use this whenever the user asks to make, build, render, or ship a GIF/meme/tabloid/"episode" about a coworker in this project, asks to "do the next one" or advance the series, or pastes a chat excerpt/screenshot and asks for a gif version of it — even if they don't say the word "skill" or name a file format. Also use when the user asks what's next in the queue, wants to check series_state.json, or references a past episode by name (e.g. "alex_01", "the memory leak one", "make a graphs one").
 ---
 
 # GIF episode
@@ -85,9 +85,9 @@ is going to catch a bad call before a real person sees themselves in a GIF.
    never as a softened or coded reference inside the episode itself.
 4. **Don't name a third party the graph itself doesn't name.** If a quote
    drags in someone unnamed, keep them unnamed too, or cut the quote.
-5. **Alternate style.** `plan_episode.py`'s `recommended_style` already
-   checked the last entry in `done` — use it unless the user explicitly asks
-   for the other kit by name.
+5. **Rotate style.** `plan_episode.py`'s `recommended_style` already cycles
+   tabloid -> ballad -> meme -> tabloid -> ... off the last entry in `done` —
+   use it unless the user explicitly asks for a specific kit by name.
 6. **Nothing safe, nothing shipped.** If a subject's material is too thin or
    too sensitive to make a decent, safe episode out of, stop and tell the
    user instead of stretching four words into a headline or reaching for
@@ -95,20 +95,35 @@ is going to catch a bad call before a real person sees themselves in a GIF.
 
 ## Writing the episode script
 
-Both kits already exist and do the actual drawing — this skill's job is
+All three kits already exist and do the actual drawing — this skill's job is
 supplying good content to them, not reimplementing rendering. Read
-`tabloid_kit.py` or `ballad_kit.py` (whichever `plan_episode.py` recommended)
-for the class you're instantiating. Then read one or two *recent* episode
-scripts as worked examples before writing a new one, rather than assuming
-any specific filename still exists — check `series_state.json`'s `done`
-list (last few entries, filtered to the style you're using) or `ls epNN_*.py`
-sorted by number, and open whichever are newest. The series keeps growing,
-so a name from today's run will eventually be as stale as any other — the
-point is "read something recent," not "read this exact file." If you're
-doing ballad, notice that `title()`/`counter()` take an `emblem` callback: a
-small subject-relevant doodle the episode script draws itself with raw PIL
-calls (a camper for someone's off-grid setup, a broken key icon for a lost
-API key) — look at how an existing one is built before inventing your own.
+`tabloid_kit.py`, `ballad_kit.py`, or `meme_kit.py` (whichever
+`plan_episode.py` recommended) for the class you're instantiating. Then read
+one or two *recent* episode scripts as worked examples before writing a new
+one, rather than assuming any specific filename still exists — check
+`series_state.json`'s `done` list (last few entries, filtered to the style
+you're using) or `ls epNN_*.py` sorted by number, and open whichever are
+newest. The series keeps growing, so a name from today's run will eventually
+be as stale as any other — the point is "read something recent," not "read
+this exact file." If you're doing ballad, notice that `title()`/`counter()`
+take an `emblem` callback: a small subject-relevant doodle the episode
+script draws itself with raw PIL calls (a camper for someone's off-grid
+setup, a broken key icon for a lost API key) — look at how an existing one
+is built before inventing your own.
+
+If you're doing meme, `MemeReel.card(template, top, bottom, cap)` fetches a
+real quote stamped onto a stock template from api.memegen.link — browse
+https://api.memegen.link/templates/ for a template id that actually fits the
+joke rather than defaulting to the same one or two every time. `top`/`bottom`
+are the words baked into the template image itself, so they can paraphrase
+around the template's fixed format (e.g. "before / after"), but `cap` (the
+line printed under the card) must still be an exact verbatim quote per rule
+1 — that's the part doing the same job as a tabloid pull-quote or ballad
+chat bubble. Close with one `stinger(line1, line2)` call, the same way
+tabloid ends on STOP PRESS and ballad ends on `counter()`. This kit needs
+network access at render time (it calls out to a live third-party API) —
+the other two don't; if the fetch fails, fix the template id or connectivity
+and rerun rather than papering over it.
 
 A few things worth knowing that aren't obvious from reading one example:
 

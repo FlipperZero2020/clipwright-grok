@@ -23,6 +23,9 @@ Prints one JSON object to stdout, e.g.:
       "warning": null
     }
 
+`recommended_style` cycles tabloid -> ballad -> meme -> tabloid -> ... (see
+`style_order` below), always the one after `last_style_used`.
+
 `gif_prefix` is missing its slug on purpose — pick a slug that fits the
 episode's masthead/title and append it yourself, e.g. gif_prefix + "memory_leak.gif".
 
@@ -79,7 +82,12 @@ def main():
     done = state.get("done", [])
     pending = state.get("pending", [])
     last_style = done[-1]["style"] if done else None
-    recommended_style = {"tabloid": "ballad", "ballad": "tabloid"}.get(last_style, "tabloid")
+    style_order = ["tabloid", "ballad", "meme"]
+    kit_modules = {"tabloid": "tabloid_kit", "ballad": "ballad_kit", "meme": "meme_kit"}
+    if last_style in style_order:
+        recommended_style = style_order[(style_order.index(last_style) + 1) % len(style_order)]
+    else:
+        recommended_style = "tabloid"
 
     mode, group, topic_hint = "ad_hoc", None, None
     subject = args.subject
@@ -115,7 +123,7 @@ def main():
         "gif_prefix": "%s_%02d_" % (firstname.lower(), pnum),
         "last_style_used": last_style,
         "recommended_style": recommended_style,
-        "kit_module": "tabloid_kit" if recommended_style == "tabloid" else "ballad_kit",
+        "kit_module": kit_modules[recommended_style],
         "project_root": root,
         "warning": warning,
     }
