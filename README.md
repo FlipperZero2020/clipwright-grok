@@ -176,8 +176,12 @@ daemon warns loudly on any other mode:
 CLIPWRIGHT_BOT_TOKEN=123456789:AA...
 # your Telegram user id
 CLIPWRIGHT_OWNER_ID=111111111
-# optional comma list; everyone else gets silence
+# optional comma list; everyone else gets silence in a DM (in a group, the guest quota below)
 CLIPWRIGHT_FRIEND_IDS=222222222,333333333
+# optional comma list of group chat ids (negative); set, the bot works only in those groups
+# and ignores any other it is added to; unset, it works in every group it is in. Either way,
+# once it is in the groups you want, BotFather's /setjoingroups → Disable stops further adds
+CLIPWRIGHT_GROUP_IDS=-1001234567890
 # optional: relocate the state dir (uploads, renders, sqlite, pidfile, log);
 # $CLIPWRIGHT_HOME in the process environment wins over this line, --home over both
 CLIPWRIGHT_HOME=/home/tom/.clipwright
@@ -190,6 +194,9 @@ CLIPWRIGHT_MAX_DIM=1920
 # exports per user per day, and render jobs queued at once
 CLIPWRIGHT_PER_DAY_QUOTA=200
 CLIPWRIGHT_QUEUE_DEPTH=8
+# renders per day for a group member who is neither owner nor friend (every preview,
+# button press and export is one); 0 turns group rendering off
+CLIPWRIGHT_GUEST_PER_DAY_QUOTA=10
 # uploads + renders kept on disk per user, and how many days an idle session lives
 CLIPWRIGHT_MAX_USER_BYTES=1000000000
 CLIPWRIGHT_RETENTION_DAYS=14
@@ -223,8 +230,28 @@ pidfile lock in the state dir because a second poller on the same token makes up
   `.recipe.toml` sidecar; the sent file's `file_unique_id` is ledgered.
 - Reply `/remix` to a GIF the bot sent you and the session reopens with its knobs live (your
   own exports, or any export if you are the owner).
-- `/start`, `/help`, `/recipes`; allowlist (owner + friends), per-user concurrency of 1, a
-  queue depth cap, and a per-day export quota.
+- In a group, reply `/gif` (or `/gif@<bot>`) to a video and the preview lands as a reply to
+  that message, with the same keyboard. A group is a room, not an inbox: bare videos and
+  chatter are ignored without a word, other bots' commands are left alone unless addressed
+  `@<bot>`, and everything the bot sends there is a reply to the message that asked (so it
+  stays in the right forum topic — and it is still sent if that message has since been
+  deleted). `/gif` without a reply gets a one-line hint.
+- Group members off the allowlist are guests: every render they trigger (the `/gif` preview,
+  each button press, recipe switch, undo, text knob, export and `/remix`) counts against
+  `CLIPWRIGHT_GUEST_PER_DAY_QUOTA`, checked before a byte is downloaded; `0` turns group
+  rendering off. Owner and friends keep paying the export quota only. A guest hears each
+  hint or refusal at most once a minute, so a loop of `/gif` cannot spend the group's send
+  allowance for everyone else.
+- Buttons and text prompts belong to the user who opened the session: another member's press
+  gets a "someone else's session" toast, and only the owner's reply *to the prompt* is taken
+  as the answer — ordinary chatter from them is left alone even when the bot's privacy mode
+  is off.
+- Anonymous admins, members posting as a channel and Telegram's service accounts all share one
+  sender id, so they are not served: `/gif` from them gets a one-line "send it as yourself",
+  everything else is ignored.
+- `/start`, `/help`, `/recipes`; DM allowlist (owner + friends); groups open to members under
+  the guest quota (every group the bot is in, or only those in `CLIPWRIGHT_GROUP_IDS`);
+  per-user concurrency of 1, a queue depth cap, and a per-day export quota.
 
 ### What does not, yet
 

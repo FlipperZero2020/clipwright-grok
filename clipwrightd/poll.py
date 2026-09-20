@@ -19,8 +19,30 @@ button press edits that one message in place; the top row
 switches recipes. Export cooks the real GIF, sends it as a document with
 its ``.recipe.toml`` sidecar, and ledgers the sent ``file_unique_id`` so
 ``/remix`` can reopen it later — for the user who exported it (or the
-owner): the recipe names that user's private upload. Anyone not on the
-allowlist gets silence (logged once).
+owner): the recipe names that user's private upload. In a DM anyone not on
+the allowlist gets silence (logged once).
+
+Groups are served too, on a shorter leash. A group is a room, not an inbox:
+only explicit commands are acted on, and ``/gif`` in reply to a video is
+the way in — bare videos, chatter, stickers and joins are ignored without a
+word (other bots own the commands we do not know, unless one is addressed
+``@us``). Whoever is on the allowlist is served as in a DM; every other
+member is a *guest*, charged ``guest_per_day_quota`` for each render they
+trigger (preview, knob, export) and refused before a byte is downloaded
+once it is spent, and hears each hint or refusal at most once a minute (a
+hint costs them nothing, so a loop of ``/gif`` would otherwise spend the
+group's send allowance for everyone). Everything the bot sends in a group
+is a reply — to the ``/gif`` that opened the session (kept as
+``origin_message_id``) or to the message that asked — which also lands it
+in the right forum topic, and is still sent once that message has been
+deleted. Buttons and text prompts belong to the user who opened the
+session: another member's press is a toast, and only the owner's reply to
+the prompt itself is an answer (with privacy mode off the bot hears every
+word in the room). Senders that are not one person — anonymous admins,
+members posting as a channel, Telegram's own service accounts — share one
+id and are not served: ``/gif`` from them gets ``ANON_HINT``, the rest is
+dropped. ``CLIPWRIGHT_GROUP_IDS``, when set, names the only groups the bot
+works in; unset, any group it is added to.
 
 Three rules keep what the user sees true:
 
@@ -91,6 +113,15 @@ QUEUE_FULL = "The queue is full right now — try again in a minute."
 STALE_BUTTON = "That button is stale."
 CLIP_END = "That's the end of the clip."
 SHUT_DOWN_MID_RENDER = "I was shut down mid-render — send that again in a minute."
+GIF_HINT = "Reply /gif to a video and I'll GIF it."
+GROUP_OFF = "Group rendering is off in this chat."
+GROUP_START = ("Reply /gif to a video in this chat and I'll turn it into a GIF you can tune "
+               "with buttons. /help for details.")
+ANON_HINT = "I can't tell anonymous admins or channels apart — send /gif as yourself."
+NAG_COOLDOWN_S = 60.0        # a guest's hints and refusals in a group: one of each per minute, the rest logged
+USERNAME_RETRY_S = 60.0      # how often a failed startup getMe is retried when a /cmd@name needs it
+# Telegram's stand-in senders: anonymous admins, "send as channel" posters and linked-channel forwards
+TELEGRAM_SERVICE_IDS = frozenset({1087968824, 136817688, 777000})
 FATAL_API_CODES = (401, 404)   # Unauthorized / Not Found on the bot URL: the token itself is wrong
 _EXT_FOR_MIME = {"video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm"}
 
@@ -99,6 +130,7 @@ COMMANDS = [
     {"command": "help", "description": "How to use it"},
     {"command": "recipes", "description": "List the cookbook"},
     {"command": "remix", "description": "Reply to a GIF I sent to reopen its knobs"},
+    {"command": "gif", "description": "Reply to a video in a group to GIF it"},
 ]
 
 HELP_TEXT = (
@@ -109,7 +141,9 @@ HELP_TEXT = (
     "• ⬇ Export sends the real GIF plus its .recipe.toml.\n"
     "• Reply /remix to any GIF I sent you to reopen its knobs.\n"
     "• ⌘ Show CLI prints the command that reproduces the render.\n\n"
-    f"Clips are rendered {SEGMENT_CAP_S:g} s at a time — slide the in/out points to pick the part."
+    f"Clips are rendered {SEGMENT_CAP_S:g} s at a time — slide the in/out points to pick the part.\n\n"
+    "In groups: reply /gif to a video and I'll answer with the preview and its buttons. "
+    "Only the person who sent /gif can press them; everyone gets a daily allowance of renders."
 )
 
 CookFn = Callable[..., CookResult]
@@ -148,12 +182,41 @@ def _sent_file(resp: dict) -> dict | None:
     return None
 
 
-def _command_of(text: str) -> str | None:
-    """``"/start@bot arg"`` -> ``"start"``; None for non-commands."""
+def _command_of(text: str) -> tuple[str, str | None] | None:
+    """``"/start@bot arg"`` -> ``("start", "bot")``, ``"/start"`` -> ``("start", None)``; None for non-commands."""
     if not text.startswith("/"):
         return None
     word = text.split(None, 1)[0][1:]
-    return word.split("@", 1)[0].lower()
+    command, _, target = word.partition("@")
+    return command.lower(), (target.lower() or None)
+
+
+def _chat_kind(chat: dict | None) -> str | None:
+    """``"dm"`` for a private chat, ``"group"`` for a group or supergroup, None for anything else (a channel)."""
+    kind = (chat or {}).get("type")
+    if kind == "private":
+        return "dm"
+    if kind in ("group", "supergroup"):
+        return "group"
+    return None
+
+
+def _impersonal(msg: dict) -> bool:
+    """True when the sender is not one person: an anonymous admin, a channel, a bot or a service account.
+
+    Such senders share one ``from.id``, so serving them would pool their
+    quota, their disk budget and their session ownership.
+    """
+    sender = msg.get("from") or {}
+    return bool(msg.get("sender_chat")) or bool(sender.get("is_bot")) or sender.get("id") in TELEGRAM_SERVICE_IDS
+
+
+def _from_us(msg: dict, username: str | None) -> bool:
+    """True when ``msg`` is a reply to a message of ours (a bot's, and by name when we know ours)."""
+    sender = (msg.get("reply_to_message") or {}).get("from") or {}
+    if not sender.get("is_bot"):
+        return False
+    return username is None or str(sender.get("username", "")).lower() == username
 
 
 def _user_error(exc: BaseException) -> str:
@@ -261,10 +324,15 @@ class Daemon:
         self.offset_path = os.path.join(self.home, OFFSET_FILE)
         self.offset: int | None = None
         self.sleep: Callable[[float], None] = time.sleep
+        self.clock: Callable[[], float] = time.monotonic       # for the cooldowns; injectable like sleep
         self._pidfile = None
+        self.username: str | None = None                      # from getMe; None until run(), or when it failed
+        self._username_retry_at = 0.0                         # clock() before which a failed getMe is not retried
         self._silenced: set[int | None] = set()
-        self._pending_text: dict[int, tuple[str, int]] = {}   # chat_id -> (token, knob_idx)
-        self._waiting: dict[int, int] = {}                    # user_id -> chat_id of their queued render
+        self._silenced_chats: set[int] = set()                # groups off CLIPWRIGHT_GROUP_IDS, logged once each
+        self._nagged: dict[tuple[int, int, str], float] = {}  # (chat_id, user_id, text) -> clock() of the last send
+        self._pending_text: dict[tuple[int, int], tuple[str, int]] = {}   # (chat_id, user_id) -> (token, knob_idx)
+        self._waiting: dict[int, tuple[int, int | None]] = {}   # user_id -> (chat_id, origin) of their queued render
         self._clip_ends: dict[str, float] = {}                # upload path -> probed duration (s)
         self._stopping = False                                # set once shutdown begins; jobs word failures by it
         self._last_sweep = 0.0
@@ -323,6 +391,7 @@ class Daemon:
         backoff = BACKOFF_MIN_S
         log.info("clipwrightd polling from offset %s (home %s)", self.offset, self.home)
         try:
+            self.username = self._bot_username()    # inside the try: a Ctrl-C during a hung getMe still exits cleanly
             self._maybe_sweep()
             while True:
                 try:
@@ -363,14 +432,40 @@ class Daemon:
             self._shutdown()
             self.release_pidfile()
 
+    def _bot_username(self) -> str | None:
+        """``getMe``'s username, so a group's ``/cmd@name`` can be told ours from another bot's.
+
+        None when the call fails: every ``@name`` is then read as another
+        bot's, which costs a group the menu-tapped form of our own commands
+        (clients send those as ``/gif@name``) — so the next such command
+        retries the call, at most once a minute, rather than waiting for a
+        restart.
+        """
+        self._username_retry_at = self.clock() + USERNAME_RETRY_S
+        try:
+            name = (self.api.get_me() or {}).get("username")
+        except BotAPIError as err:
+            log.warning("getMe failed (%s); commands addressed @<bot> are treated as another bot's", err)
+            return None
+        return name.lower() if isinstance(name, str) and name else None
+
+    def _ours(self, target: str | None) -> bool:
+        """Whether a command's ``@target`` names this bot, fetching our name again when a startup getMe failed."""
+        if target is None:
+            return False
+        if self.username is None and self.clock() >= self._username_retry_at:
+            self.username = self._bot_username()
+        return target == self.username
+
     def _shutdown(self) -> None:
         """Let the running render finish, then tell anyone still in line that theirs was dropped."""
         if self.queue.size:
             log.info("waiting for the running render to finish (Ctrl-C again to abandon it)")
         for uid, _job in self.queue.stop():
-            chat_id = self._waiting.get(uid)
-            if chat_id is not None:
-                self._tell(chat_id, "I'm shutting down before your render ran — send that again in a minute.")
+            where = self._waiting.get(uid)
+            if where is not None:
+                self._tell(where[0], "I'm shutting down before your render ran — send that again in a minute.",
+                           where[1])
 
     def handle_update(self, update: dict) -> None:
         """Dispatch one update. Never raises: failures are logged and told to the user."""
@@ -381,9 +476,9 @@ class Daemon:
                 self._handle_message(update["message"])
         except Exception:
             log.exception("update %s failed", update.get("update_id"))
-            chat_id = self._chat_of(update)
-            if chat_id is not None:
-                self._tell(chat_id, "Something went wrong on my side — try that again.")
+            where = self._chat_of(update)
+            if where is not None:
+                self._tell(where[0], "Something went wrong on my side — try that again.", where[1])
 
     # -- disk ------------------------------------------------------------------
 
@@ -454,14 +549,62 @@ class Daemon:
 
     # -- gates ---------------------------------------------------------------
 
-    def _allowed(self, from_user: dict | None) -> int | None:
-        """The sender's id when allowlisted; otherwise None, logged once per stranger."""
+    def _actor(self, from_user: dict | None, group: bool) -> tuple[int, bool] | None:
+        """Who is served: ``(uid, is_guest)``, or None for a stranger (silence, logged once).
+
+        The allowlist (owner + friends) is served everywhere. In a group
+        every other member is a *guest*, served under the guest quota; in a
+        DM they are a stranger. A guest exists only inside a group.
+        """
         uid = (from_user or {}).get("id")
-        if isinstance(uid, int) and uid in self.config.allowed:
-            return uid
+        if isinstance(uid, int):
+            if uid in self.config.allowed:
+                return uid, False
+            if group:
+                return uid, True
         if uid not in self._silenced:
             self._silenced.add(uid)
             log.warning("dropping update from non-allowlisted user %s", uid)
+        return None
+
+    def _group_served(self, chat_id: int) -> bool:
+        """Whether this group is one the bot works in: any group unless ``group_ids`` names some (logged once)."""
+        if not self.config.group_ids or chat_id in self.config.group_ids:
+            return True
+        if chat_id not in self._silenced_chats:
+            self._silenced_chats.add(chat_id)
+            log.warning("ignoring group %s: not in CLIPWRIGHT_GROUP_IDS", chat_id)
+        return False
+
+    def _nag(self, chat_id: int, uid: int, text: str, origin: int | None, guest: bool) -> None:
+        """``_say`` a hint or refusal; a guest hears each one at most once per NAG_COOLDOWN_S in a chat.
+
+        Hints cost a guest nothing, so a member typing ``/gif`` in a loop
+        would otherwise have the bot spend the group's send allowance on
+        them, and every other member's render with it.
+        """
+        if guest:
+            key, now = (chat_id, uid, text), self.clock()
+            last = self._nagged.get(key)
+            if last is not None and now - last < NAG_COOLDOWN_S:
+                log.debug("not repeating %r to user %s in chat %s", text, uid, chat_id)
+                return
+            self._nagged[key] = now
+        self._say(chat_id, text, origin)
+
+    def _charge_guest(self, uid: int, chat_id: int) -> str | None:
+        """Count one guest render; the refusal to send when the group is off or their day is spent.
+
+        Called where the owner's export quota is: after every other gate has
+        passed and right before the job is queued, so a refusal never
+        charges a render that was not going to happen.
+        """
+        limit = self.config.guest_per_day_quota
+        if limit <= 0:
+            return GROUP_OFF
+        if self.store.quota_hit(uid, limit):
+            return f"You've used today's {limit} renders — try again tomorrow."
+        log.info("guest render for user %s in chat %s", uid, chat_id)
         return None
 
     def _busy(self, uid: int) -> str | None:
@@ -473,27 +616,59 @@ class Daemon:
         return None
 
     @staticmethod
-    def _chat_of(update: dict) -> int | None:
+    def _chat_of(update: dict) -> tuple[int, int | None] | None:
+        """``(chat_id, origin)`` of an update: ``origin`` is the message to reply to in a group, None in a DM."""
         msg = update.get("message") or (update.get("callback_query") or {}).get("message") or {}
-        return (msg.get("chat") or {}).get("id")
+        chat_id = (msg.get("chat") or {}).get("id")
+        if chat_id is None:
+            return None
+        return chat_id, msg.get("message_id") if _chat_kind(msg.get("chat")) == "group" else None
 
-    def _tell(self, chat_id: int, text: str) -> None:
-        """send_message that swallows its own failure — used only for last-resort notices."""
+    def _say(self, chat_id: int, text: str, origin: int | None = None,
+             reply_markup: dict | None = None) -> dict:
+        """send_message, as a reply to ``origin`` when there is one (a group), plain otherwise (a DM)."""
+        return self.api.send_message(chat_id, text, reply_markup=reply_markup, reply_to_message_id=origin)
+
+    def _tell(self, chat_id: int, text: str, origin: int | None = None) -> None:
+        """``_say`` that swallows its own failure — used only for last-resort notices."""
         try:
-            self.api.send_message(chat_id, text)
+            self._say(chat_id, text, origin)
         except BotAPIError as err:
             log.warning("could not message chat %s: %s", chat_id, err)
 
     # -- messages ------------------------------------------------------------
 
     def _handle_message(self, msg: dict) -> None:
-        uid = self._allowed(msg.get("from"))
-        if uid is None:
+        kind = _chat_kind(msg.get("chat"))
+        if kind is None:
             return
+        group = kind == "group"
         chat_id = msg["chat"]["id"]
+        if group and not self._group_served(chat_id):
+            return
+        origin = msg.get("message_id") if group else None    # in a group, what every answer replies to
         text = msg.get("text")
-        if isinstance(text, str) and (command := _command_of(text)) is not None:
-            self._handle_command(command, msg, uid, chat_id)
+        parsed = _command_of(text) if isinstance(text, str) else None
+        if _impersonal(msg):
+            if group and parsed is not None and parsed[0] == "gif" and (parsed[1] is None or self._ours(parsed[1])):
+                self._nag(chat_id, (msg.get("from") or {}).get("id") or 0, ANON_HINT, origin, guest=True)
+            else:
+                log.debug("ignoring a message with no single sender in chat %s", chat_id)
+            return
+        actor = self._actor(msg.get("from"), group)
+        if actor is None:
+            return
+        uid, guest = actor
+        if parsed is not None:
+            command, target = parsed
+            self._handle_command(command, msg, uid, chat_id, target=target, group=group,
+                                 origin=origin, guest=guest)
+            return
+        if group:            # a room, not an inbox: nothing but commands and answers to our own prompts
+            if isinstance(text, str) and (chat_id, uid) in self._pending_text and _from_us(msg, self.username):
+                self._on_text(text, uid, chat_id, origin=origin, guest=guest)
+            else:
+                log.debug("ignoring a non-command message from user %s in group %s", uid, chat_id)
             return
         media = _media_of(msg)
         if media is not None:
@@ -503,66 +678,93 @@ class Daemon:
         else:
             self.api.send_message(chat_id, "Send me a video (mp4/mov/webm) to start, or /help.")
 
-    def _handle_command(self, command: str, msg: dict, uid: int, chat_id: int) -> None:
-        if command == "start":
-            self.api.send_message(
-                chat_id,
+    def _handle_command(self, command: str, msg: dict, uid: int, chat_id: int, *,
+                        target: str | None = None, group: bool = False, origin: int | None = None,
+                        guest: bool = False) -> None:
+        """``target`` is the ``@name`` the command carried; in a group one that is not ours is left alone."""
+        ours = self._ours(target)
+        if group and target is not None and not ours:
+            return
+        if command == "gif":
+            self._on_gif(msg, uid, chat_id, origin=origin, guest=guest)
+        elif command == "start":
+            self._nag(chat_id, uid, GROUP_START if group else (
                 f"Hi! Send me a video (up to {_mb(self.config.max_upload_bytes)}, "
                 f"{self.config.max_duration_s:.0f} s) and I'll turn it into a looping GIF "
-                "you can tune with buttons. /help for the details.")
+                "you can tune with buttons. /help for the details."), origin, guest)
         elif command == "help":
-            self.api.send_message(chat_id, HELP_TEXT)
+            self._nag(chat_id, uid, HELP_TEXT, origin, guest)
         elif command == "recipes":
             lines = [f"{d.emoji} {name} — {d.blurb}" for name, d in self.cookbook.items()]
-            self.api.send_message(chat_id, "Cookbook:\n" + "\n".join(lines))
+            self._nag(chat_id, uid, "Cookbook:\n" + "\n".join(lines), origin, guest)
         elif command == "remix":
-            self._on_remix(msg, uid, chat_id)
+            self._on_remix(msg, uid, chat_id, origin=origin, guest=guest)
+        elif group and not ours:
+            log.debug("ignoring /%s in group %s: not addressed to us", command, chat_id)
         else:
-            self.api.send_message(chat_id, f"I don't know /{command}. Try /help.")
+            self._nag(chat_id, uid, f"I don't know /{command}. Try /help.", origin, guest)
 
-    def _on_video(self, media: dict, uid: int, chat_id: int) -> None:
+    def _on_gif(self, msg: dict, uid: int, chat_id: int, *, origin: int | None = None,
+                guest: bool = False) -> None:
+        """``/gif`` in reply to a video: the upload path, with the replied-to message as the upload."""
+        media = _media_of(msg.get("reply_to_message") or {})
+        if media is None:
+            self._nag(chat_id, uid, GIF_HINT, origin, guest)
+            return
+        if guest and self.config.guest_per_day_quota <= 0:
+            self._nag(chat_id, uid, GROUP_OFF, origin, guest)
+            return
+        self._on_video(media, uid, chat_id, origin=origin, guest=guest)
+
+    def _on_video(self, media: dict, uid: int, chat_id: int, *, origin: int | None = None,
+                  guest: bool = False) -> None:
         """Gate an upload on what Telegram already told us, then hand the ingest to the worker.
 
         Nothing here waits on the network or on ffprobe: the size, queue and
         disk-budget gates need only the message, and the download + probe
         run as the user's queued job, so a slow or hostile upload costs its
-        sender their one slot, not everyone the poll loop.
+        sender their one slot, not everyone the poll loop. A guest is
+        charged last, once every other gate has let them through, and a
+        spent one costs no disk.
         """
         cap = self.config.max_upload_bytes
         size = media.get("file_size")
         if isinstance(size, int) and size > cap:
-            self.api.send_message(
-                chat_id, f"That's {_mb(size)}; I can take up to {_mb(cap)}. Trim it and resend.")
+            self._nag(chat_id, uid, f"That's {_mb(size)}; I can take up to {_mb(cap)}. Trim it and resend.",
+                      origin, guest)
             return
         if (busy := self._busy(uid)) is not None:
-            self.api.send_message(chat_id, busy)
+            self._nag(chat_id, uid, busy, origin, guest)
             return
         used = self._user_bytes(uid)
         if used + (size if isinstance(size, int) else 0) > self.config.max_user_bytes:
-            self.api.send_message(
-                chat_id, f"Your clips here add up to {_mb(used)}, and I keep at most "
+            self._nag(
+                chat_id, uid, f"Your clips here add up to {_mb(used)}, and I keep at most "
                 f"{_mb(self.config.max_user_bytes)} per person. Clips behind your exports stay "
                 f"so /remix keeps working; the rest clears once its session has sat idle for "
-                f"{self.config.retention_days:g} days.")
+                f"{self.config.retention_days:g} days.", origin, guest)
             return
-        self._pending_text.pop(chat_id, None)
-        self._submit(uid, chat_id, self._ingest_job(media, uid, chat_id))
+        if guest and (why := self._charge_guest(uid, chat_id)) is not None:
+            self._nag(chat_id, uid, why, origin, guest)
+            return
+        self._pending_text.pop((chat_id, uid), None)
+        self._submit(uid, chat_id, self._ingest_job(media, uid, chat_id, origin), origin=origin)
 
-    def _ingest_job(self, media: dict, uid: int, chat_id: int) -> Job:
+    def _ingest_job(self, media: dict, uid: int, chat_id: int, origin: int | None = None) -> Job:
         """The queued half of an upload: fetch, probe, open the session, render its first preview."""
         def run() -> None:
             try:
-                token = self._ingest(media, uid, chat_id)
+                token = self._ingest(media, uid, chat_id, origin)
             except _Rejected as why:
-                self._tell(chat_id, str(why))
+                self._tell(chat_id, str(why), origin)
                 return
             except Exception as exc:
-                self._report_failure(chat_id, exc, f"upload from user {uid}")
+                self._report_failure(chat_id, exc, f"upload from user {uid}", origin)
                 return
             self._job(token, self._render_preview)()
         return run
 
-    def _ingest(self, media: dict, uid: int, chat_id: int) -> str:
+    def _ingest(self, media: dict, uid: int, chat_id: int, origin: int | None = None) -> str:
         """Download and probe one upload; return the token of its new session (``_Rejected`` otherwise)."""
         cap = self.config.max_upload_bytes
         self.api.send_chat_action(chat_id, "upload_video")
@@ -586,7 +788,7 @@ class Daemon:
             inst["from"] = recipe.fmt_time(0.0)
             inst["to"] = recipe.fmt_time(probe.duration)
             _clamp_segment(inst)
-        token = self.store.create_session(uid, chat_id, inst)
+        token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
         log.info("session %s for user %s: %s (%.1fs %dx%d)", token, uid, dest,
                  probe.duration, probe.width, probe.height)
         return token
@@ -616,66 +818,76 @@ class Daemon:
                             f"{self.config.max_dim} px on the long side. Downscale it and resend.")
         return probe
 
-    def _on_text(self, text: str, uid: int, chat_id: int) -> None:
-        pending = self._pending_text.get(chat_id)
+    def _on_text(self, text: str, uid: int, chat_id: int, *, origin: int | None = None,
+                 guest: bool = False) -> None:
+        """A text message: the answer to this user's pending prompt, or (in a DM) a nudge towards /help."""
+        key = (chat_id, uid)
+        pending = self._pending_text.get(key)
         if pending is None:
-            self.api.send_message(chat_id, "Send me a video to start, or /help.")
+            self._say(chat_id, "Send me a video to start, or /help.", origin)
             return
         token, knob_idx = pending
         sess = self.store.get(token)
         if sess is None:
-            del self._pending_text[chat_id]
-            self.api.send_message(chat_id, "That session has expired — send the video again.")
-            return
-        if sess.user_id != uid:
-            self.api.send_message(chat_id, "That prompt is for someone else's session.")
+            del self._pending_text[key]
+            self._say(chat_id, "That session has expired — send the video again.", origin)
             return
         defn = self._defn(sess)
         knob = _text_knob(defn, knob_idx)
         if knob is None:                      # the session changed recipe under the prompt
-            del self._pending_text[chat_id]
-            self.api.send_message(chat_id, "That prompt no longer matches the session — use the buttons under the preview.")
+            del self._pending_text[key]
+            self._say(chat_id, "That prompt no longer matches the session — use the buttons under the preview.", origin)
             return
         new = copy.deepcopy(sess.recipe)
         recipe.set_(new, knob.key, text.strip())
         problems = recipe.validate(new, defn)
         if problems:
-            self.api.send_message(chat_id, "; ".join(problems) + ". Try again:",
-                                  reply_markup=_force_reply(knob))
+            self._say(chat_id, "; ".join(problems) + ". Try again:", origin, reply_markup=_force_reply(knob))
             return
         if (busy := self._busy(uid)) is not None:   # the prompt stays pending; the retry is taken
-            self.api.send_message(chat_id, busy, reply_markup=_force_reply(knob))
+            self._say(chat_id, busy, origin, reply_markup=_force_reply(knob))
             return
-        del self._pending_text[chat_id]
+        if guest and (why := self._charge_guest(uid, chat_id)) is not None:
+            del self._pending_text[key]
+            self._say(chat_id, why, origin)
+            return
+        del self._pending_text[key]
         self.store.update(token, new)
-        self._submit(uid, chat_id, self._job(token, self._render_again))
+        self._submit(uid, chat_id, self._job(token, self._render_again), origin=sess.origin_message_id)
 
-    def _on_remix(self, msg: dict, uid: int, chat_id: int) -> None:
+    def _on_remix(self, msg: dict, uid: int, chat_id: int, *, origin: int | None = None,
+                  guest: bool = False) -> None:
         target = msg.get("reply_to_message") or {}
         sent = next((target[k] for k in ("animation", "document") if isinstance(target.get(k), dict)), None)
         if sent is None or not sent.get("file_unique_id"):
-            self.api.send_message(chat_id, "Reply /remix to a GIF I sent and I'll reopen its knobs.")
+            self._nag(chat_id, uid, "Reply /remix to a GIF I sent and I'll reopen its knobs.", origin, guest)
             return
         entry = self.store.ledger_entry(sent["file_unique_id"])
         if entry is None:
-            self.api.send_message(chat_id, "I don't have a recipe for that file — it wasn't one of my exports.")
+            self._nag(chat_id, uid, "I don't have a recipe for that file — it wasn't one of my exports.",
+                      origin, guest)
             return
         if not self._may_remix(uid, entry):
             log.warning("user %s asked to remix %s, exported by user %s", uid, entry.file_unique_id, entry.user_id)
-            self.api.send_message(chat_id, "That export belongs to someone else — only they (or the owner) can remix it.")
+            self._nag(chat_id, uid, "That export belongs to someone else — only they (or the owner) can remix it.",
+                      origin, guest)
             return
         inst = entry.recipe
         src = inst.get("input")
         if isinstance(src, str) and not os.path.isfile(src):
-            self.api.send_message(chat_id, "The clip behind that export is no longer on disk — send it again to start over.")
+            self._nag(chat_id, uid, "The clip behind that export is no longer on disk — send it again to start over.",
+                      origin, guest)
             return
         if (busy := self._busy(uid)) is not None:
-            self.api.send_message(chat_id, busy)
+            self._nag(chat_id, uid, busy, origin, guest)
+            return
+        if guest and (why := self._charge_guest(uid, chat_id)) is not None:
+            self._nag(chat_id, uid, why, origin, guest)
             return
         _clamp_segment(inst)
-        token = self.store.create_session(uid, chat_id, inst)
+        token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
         log.info("remix %s -> session %s for user %s", sent["file_unique_id"], token, uid)
-        self._submit(uid, chat_id, self._job(token, self._render_preview))
+        self._submit(uid, chat_id, self._job(token, self._render_preview), origin=origin)
 
     def _may_remix(self, uid: int, entry: LedgerEntry) -> bool:
         """The owner may remix anything; anyone else only what they exported themselves."""
@@ -690,11 +902,16 @@ class Daemon:
     # -- callbacks -----------------------------------------------------------
 
     def _handle_callback(self, cq: dict) -> None:
-        uid = self._allowed(cq.get("from"))
-        if uid is None:
+        chat = (cq.get("message") or {}).get("chat") or {}
+        kind = _chat_kind(chat)
+        if kind is None or (kind == "group" and not self._group_served(chat["id"])) or _impersonal(cq):
             return
+        actor = self._actor(cq.get("from"), kind == "group")
+        if actor is None:
+            return
+        uid, guest = actor
         try:
-            toast = self._dispatch_callback(cq, uid)
+            toast = self._dispatch_callback(cq, uid, guest)
         except Exception:
             log.exception("callback %s failed", cq.get("data"))
             toast = "Something went wrong on my side — try that again."
@@ -703,8 +920,12 @@ class Daemon:
         except BotAPIError as err:                 # a replayed press is too old to answer; the work is done
             log.warning("could not answer callback %s: %s", cq.get("id"), err)
 
-    def _dispatch_callback(self, cq: dict, uid: int) -> str | None:
-        """Act on one callback and return the toast to answer it with."""
+    def _dispatch_callback(self, cq: dict, uid: int, guest: bool = False) -> str | None:
+        """Act on one callback and return the toast to answer it with.
+
+        Only the user who opened the session may press its buttons; a
+        ``guest`` is charged the guest quota for each render a press starts.
+        """
         try:
             cb = decode_cb(cq.get("data") or "")
         except ValueError:
@@ -722,12 +943,12 @@ class Daemon:
             knob = _text_knob(defn, cb.knob_idx)
             if knob is None:
                 return STALE_BUTTON
-            self._pending_text[sess.chat_id] = (cb.session, cb.knob_idx)
-            self.api.send_message(sess.chat_id, f"Send the {knob.label} (up to {knob.max_len} characters):",
-                                  reply_markup=_force_reply(knob))
+            self._pending_text[(sess.chat_id, sess.user_id)] = (cb.session, cb.knob_idx)
+            self._say(sess.chat_id, f"Send the {knob.label} (up to {knob.max_len} characters):",
+                      sess.origin_message_id, reply_markup=_force_reply(knob))
             return None
         if cb.kind == "r":
-            return self._switch_recipe(cb, sess, uid)
+            return self._switch_recipe(cb, sess, uid, guest)
         if cb.kind == "c":
             try:
                 new = recipe.apply_knob(sess.recipe, defn, cb.knob_idx, cb.value_idx)
@@ -740,9 +961,12 @@ class Daemon:
                 return f"Clips are capped at {SEGMENT_CAP_S:g} s here — move the in-point first."
             if (busy := self._busy(uid)) is not None:
                 return busy
+            if guest and (why := self._charge_guest(uid, sess.chat_id)) is not None:
+                return why
             self.store.update(cb.session, new)
-            return self._submit(uid, sess.chat_id, self._job(cb.session, self._render_again), quiet=True)
-        return self._do_action(cb, sess, uid)
+            return self._submit(uid, sess.chat_id, self._job(cb.session, self._render_again), quiet=True,
+                                origin=sess.origin_message_id)
+        return self._do_action(cb, sess, uid, guest)
 
     def _clamp_to_clip(self, inst: dict) -> bool:
         """Pull ``to`` back to the clip's probed end; True when it had to move.
@@ -778,7 +1002,7 @@ class Daemon:
             self._clip_ends[src] = end
         return end if end > 0 else None
 
-    def _switch_recipe(self, cb: Callback, sess: Session, uid: int) -> str | None:
+    def _switch_recipe(self, cb: Callback, sess: Session, uid: int, guest: bool = False) -> str | None:
         """Restart the session on another recipe, keeping the clip and its trim."""
         target = self.cookbook.get(cb.recipe)
         if target is None:
@@ -787,53 +1011,67 @@ class Daemon:
             return None
         if (busy := self._busy(uid)) is not None:
             return busy
+        if guest and (why := self._charge_guest(uid, sess.chat_id)) is not None:
+            return why
         inst = recipe.defaults(target)
         for key in ("input", "from", "to"):
             if sess.recipe.get(key) is not None:
                 inst[key] = sess.recipe[key]
-        self._pending_text.pop(sess.chat_id, None)
+        self._pending_text.pop((sess.chat_id, sess.user_id), None)
         self.store.update(cb.session, inst)
-        return self._submit(uid, sess.chat_id, self._job(cb.session, self._render_again), quiet=True)
+        return self._submit(uid, sess.chat_id, self._job(cb.session, self._render_again), quiet=True,
+                            origin=sess.origin_message_id)
 
-    def _do_action(self, cb: Callback, sess: Session, uid: int) -> str | None:
+    def _do_action(self, cb: Callback, sess: Session, uid: int, guest: bool = False) -> str | None:
         chat_id = sess.chat_id
         if cb.action == "grid":
             return GRID_TOAST
         if cb.action == "cli":
-            self.api.send_message(chat_id, cli_command(_public(sess.recipe), cookbook=self.cookbook))
+            self._say(chat_id, cli_command(_public(sess.recipe), cookbook=self.cookbook), sess.origin_message_id)
             return None
         if (busy := self._busy(uid)) is not None:
             return busy
         if cb.action == "undo":
+            if not sess.undo:
+                return "Nothing to undo."
+            if guest and (why := self._charge_guest(uid, chat_id)) is not None:
+                return why
             if self.store.undo(cb.session) is None:
                 return "Nothing to undo."
-            return self._submit(uid, chat_id, self._job(cb.session, self._render_again), quiet=True)
-        if self.store.quota_hit(uid, self.config.per_day_quota):
-            self.api.send_message(
-                chat_id, f"You've used today's {self.config.per_day_quota} exports — "
-                "the counter resets at midnight UTC. Previews still work.")
+            return self._submit(uid, chat_id, self._job(cb.session, self._render_again), quiet=True,
+                                origin=sess.origin_message_id)
+        if guest:                             # a guest's export is one more render on their day, not an owner export
+            if (why := self._charge_guest(uid, chat_id)) is not None:
+                return why
+        elif self.store.quota_hit(uid, self.config.per_day_quota):
+            self._say(chat_id, f"You've used today's {self.config.per_day_quota} exports — "
+                      "the counter resets at midnight UTC. Previews still work.", sess.origin_message_id)
             return "Daily export limit reached."
-        return self._submit(uid, chat_id, self._job(cb.session, self._render_export), quiet=True)
+        return self._submit(uid, chat_id, self._job(cb.session, self._render_export), quiet=True,
+                            origin=sess.origin_message_id)
 
     # -- render jobs (run on the queue's worker) -----------------------------
 
-    def _submit(self, uid: int, chat_id: int, job: Job, *, quiet: bool = False) -> str | None:
+    def _submit(self, uid: int, chat_id: int, job: Job, *, quiet: bool = False,
+                origin: int | None = None) -> str | None:
         """Queue ``job``; tell the user the position when they must wait. Returns the toast.
 
         Callers gate on ``_busy`` first, so a refusal here is a race the
         queue's own contract still allows; it is reported the same way.
+        ``origin`` is the group message any of that — and the shutdown
+        notice for a job that never ran — replies to.
         """
         position = self.queue.submit(uid, job)
         if position is None:
             text = self._busy(uid) or QUEUE_FULL
         else:
-            self._waiting[uid] = chat_id
+            self._waiting[uid] = (chat_id, origin)
             if position > 1:
                 text = f"Queued — #{position} in line."
             else:
                 text = "Rendering…" if quiet else None
         if text is not None and not quiet:
-            self.api.send_message(chat_id, text)
+            self._say(chat_id, text, origin)
         return text
 
     def _job(self, token: str, step: Callable[[Session], None]) -> Job:
@@ -846,10 +1084,10 @@ class Daemon:
             try:
                 step(sess)
             except Exception as exc:
-                self._report_failure(sess.chat_id, exc, f"render for session {token}")
+                self._report_failure(sess.chat_id, exc, f"render for session {token}", sess.origin_message_id)
         return run
 
-    def _report_failure(self, chat_id: int, exc: Exception, what: str) -> None:
+    def _report_failure(self, chat_id: int, exc: Exception, what: str, origin: int | None = None) -> None:
         """One log line and one message for a job that failed.
 
         While the daemon is shutting down the honest message is that it was
@@ -858,10 +1096,10 @@ class Daemon:
         """
         if self._stopping:
             log.warning("%s was cut short by the shutdown: %s", what, exc)
-            self._tell(chat_id, SHUT_DOWN_MID_RENDER)
+            self._tell(chat_id, SHUT_DOWN_MID_RENDER, origin)
             return
         log.error("%s failed", what, exc_info=exc)
-        self._tell(chat_id, _user_error(exc))
+        self._tell(chat_id, _user_error(exc), origin)
 
     def _render_preview(self, sess: Session) -> None:
         """First render of a session: cook a proxy and send it with the keyboard."""
@@ -869,7 +1107,8 @@ class Daemon:
         try:
             resp = self.api.send_animation(
                 sess.chat_id, result.mp4, caption=self._caption(sess.recipe, result.report),
-                reply_markup=self._markup(sess), filename=PREVIEW_NAME)
+                reply_markup=self._markup(sess), filename=PREVIEW_NAME,
+                reply_to_message_id=sess.origin_message_id)
         finally:
             self._discard(result)
         self.store.set_message_id(sess.token, resp["message_id"])
@@ -904,7 +1143,8 @@ class Daemon:
             caption = _export_caption(result.report or {}, os.path.getsize(gif))
             # without the flag Telegram re-types a .gif as an animation and delivers an MP4 transcode
             resp = self.api.send_document(sess.chat_id, gif, os.path.basename(gif), caption=caption,
-                                          disable_content_type_detection=True)
+                                          disable_content_type_detection=True,
+                                          reply_to_message_id=sess.origin_message_id)
             sent = _sent_file(resp)
             if sent and sent.get("file_unique_id"):
                 self.store.ledger_put(sent["file_unique_id"], sess.recipe, sess.token, sess.user_id)
@@ -912,10 +1152,12 @@ class Daemon:
                 log.warning("export %s: no file_unique_id in sendDocument response", sess.token)
             try:
                 self.api.send_document(sess.chat_id, sidecar, os.path.basename(sidecar),
-                                       caption="Recipe sidecar — reply /remix to this GIF to reopen it.")
+                                       caption="Recipe sidecar — reply /remix to this GIF to reopen it.",
+                                       reply_to_message_id=sess.origin_message_id)
             except BotAPIError as err:
                 log.warning("export %s: sidecar upload failed: %s", sess.token, err)
-                self._tell(sess.chat_id, "The recipe sidecar didn't go through, but /remix on that GIF still works.")
+                self._tell(sess.chat_id, "The recipe sidecar didn't go through, but /remix on that GIF still works.",
+                           sess.origin_message_id)
         finally:
             self._discard(result)
 

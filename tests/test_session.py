@@ -225,6 +225,36 @@ def test_ledger_gains_the_user_column_on_an_older_file(tmp_path):
     reopened.close()
 
 
+def test_sessions_gain_the_origin_column_on_an_older_file(tmp_path):
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                               message_id INTEGER, recipe_json TEXT NOT NULL,
+                               undo_json TEXT NOT NULL DEFAULT '[]',
+                               created_at REAL NOT NULL, updated_at REAL NOT NULL);
+        INSERT INTO sessions VALUES ('AAAAAA', 1, 2, 3, '{"recipe": "gifify"}', '[]', 1.0, 1.0);
+    """)
+    conn.commit()
+    conn.close()
+    store = Store(path)
+    try:
+        columns = [r[1] for r in store._conn.execute("PRAGMA table_info(sessions)")]
+        assert "origin_message_id" in columns
+        old = store.get("AAAAAA")
+        assert old.origin_message_id is None
+        assert (old.user_id, old.chat_id, old.message_id, old.recipe) == (1, 2, 3, {"recipe": "gifify"})
+        fresh = store.create_session(4, -5, RECIPE, origin_message_id=77)
+        assert store.get(fresh).origin_message_id == 77
+        assert store.get(store.create_session(4, 5, RECIPE)).origin_message_id is None
+        assert {s.token: s.origin_message_id for s in store.expire_sessions(2.0)} == {"AAAAAA": None}
+    finally:
+        store.close()
+    reopened = Store(path)                        # the migration is idempotent
+    assert reopened.get(fresh).origin_message_id == 77
+    reopened.close()
+
+
 # -- quota ------------------------------------------------------------------
 
 def test_quota_crossing(store):

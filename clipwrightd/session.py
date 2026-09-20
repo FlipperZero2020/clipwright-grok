@@ -3,9 +3,11 @@
 Three tables, one ``Store`` per daemon:
 
 - ``sessions``: a 6-char token -> the live recipe instance, its undo stack,
-  and the Telegram message the preview lives in. Callbacks carry only the
-  token (``c/<token>/<knob>/<value>``), so the recipe never round-trips
-  through a button.
+  the Telegram message the preview lives in and, for a session opened in a
+  group, the message that asked for it (``origin_message_id``: everything
+  the daemon sends for the session replies to it; None in a DM). Callbacks
+  carry only the token (``c/<token>/<knob>/<value>``), so the recipe never
+  round-trips through a button.
 - ``ledger``: a sent file's ``file_unique_id`` -> the recipe that made it and
   the user who exported it. This is what lets ``/remix`` on any old GIF
   reopen its knobs — for its owner; the recipe names their private upload.
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id     INTEGER NOT NULL,
     chat_id     INTEGER NOT NULL,
     message_id  INTEGER,
+    origin_message_id INTEGER,
     recipe_json TEXT NOT NULL,
     undo_json   TEXT NOT NULL DEFAULT '[]',
     created_at  REAL NOT NULL,
@@ -72,12 +75,12 @@ CREATE TABLE IF NOT EXISTS quota (
 """
 
 # Columns added after the first release, applied to an older file on open.
-_MIGRATIONS = [("ledger", "user_id", "INTEGER")]
+_MIGRATIONS = [("ledger", "user_id", "INTEGER"), ("sessions", "origin_message_id", "INTEGER")]
 
 
 @dataclass(frozen=True)
 class Session:
-    """One row of ``sessions``, decoded. ``undo`` is oldest-first."""
+    """One row of ``sessions``, decoded. ``undo`` is oldest-first; ``origin_message_id`` is None in a DM."""
 
     token: str
     user_id: int
@@ -87,6 +90,7 @@ class Session:
     undo: list[dict]
     created_at: float
     updated_at: float
+    origin_message_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -151,8 +155,9 @@ class Store:
 
     # -- sessions -----------------------------------------------------------
 
-    def create_session(self, user_id: int, chat_id: int, recipe: dict) -> str:
-        """Insert a new session and return its token."""
+    def create_session(self, user_id: int, chat_id: int, recipe: dict,
+                       origin_message_id: int | None = None) -> str:
+        """Insert a new session and return its token. ``origin_message_id`` is the group message it answers."""
         now = time.time()
         recipe_json = json.dumps(recipe)
         with self._lock:
@@ -161,10 +166,10 @@ class Store:
                 try:
                     with self._conn:
                         self._conn.execute(
-                            "INSERT INTO sessions (token, user_id, chat_id, message_id,"
+                            "INSERT INTO sessions (token, user_id, chat_id, message_id, origin_message_id,"
                             " recipe_json, undo_json, created_at, updated_at)"
-                            " VALUES (?, ?, ?, NULL, ?, '[]', ?, ?)",
-                            (token, user_id, chat_id, recipe_json, now, now),
+                            " VALUES (?, ?, ?, NULL, ?, ?, '[]', ?, ?)",
+                            (token, user_id, chat_id, origin_message_id, recipe_json, now, now),
                         )
                 except sqlite3.IntegrityError:
                     continue
@@ -331,4 +336,5 @@ def _session_from_row(row: sqlite3.Row) -> Session:
         undo=json.loads(row["undo_json"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        origin_message_id=row["origin_message_id"],
     )

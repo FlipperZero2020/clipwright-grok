@@ -137,6 +137,19 @@ def _drop_none(params: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in params.items() if v is not None}
 
 
+def _reply_params(reply_to_message_id: int | None) -> dict[str, Any]:
+    """The reply fields of a send: the target, and leave to send plainly once that message is gone.
+
+    Without ``allow_sending_without_reply`` Telegram answers a reply to a
+    deleted message with a 400, which would strand a group session whose
+    ``/gif`` was tidied away. Both are None for a DM, so ``_drop_none``
+    leaves that wire payload exactly as before.
+    """
+    if reply_to_message_id is None:
+        return {"reply_to_message_id": None, "allow_sending_without_reply": None}
+    return {"reply_to_message_id": reply_to_message_id, "allow_sending_without_reply": True}
+
+
 def _content_length(resp: Any) -> int | None:
     """The response's announced body size, or None when it has no usable header."""
     headers = getattr(resp, "headers", None)
@@ -196,23 +209,27 @@ class BotAPI:
                      parse_mode: str | None = None) -> dict:
         """``reply_markup`` is the full markup dict, e.g. ``{"inline_keyboard": rows}``."""
         return self.call("sendMessage", chat_id=chat_id, text=text, reply_markup=reply_markup,
-                         reply_to_message_id=reply_to_message_id, parse_mode=parse_mode)
+                         parse_mode=parse_mode, **_reply_params(reply_to_message_id))
 
     def send_animation(self, chat_id: int, path_or_bytes: bytes | str, caption: str | None = None,
-                       reply_markup: dict | None = None, filename: str = "preview.mp4") -> dict:
+                       reply_markup: dict | None = None, filename: str = "preview.mp4",
+                       reply_to_message_id: int | None = None) -> dict:
         return self.upload("sendAnimation",
                            {"animation": (filename, path_or_bytes, _mime_for(filename))},
-                           chat_id=chat_id, caption=caption, reply_markup=reply_markup)
+                           chat_id=chat_id, caption=caption, reply_markup=reply_markup,
+                           **_reply_params(reply_to_message_id))
 
     def send_document(self, chat_id: int, path_or_bytes: bytes | str, filename: str,
                       caption: str | None = None, reply_markup: dict | None = None,
-                      disable_content_type_detection: bool | None = None) -> dict:
+                      disable_content_type_detection: bool | None = None,
+                      reply_to_message_id: int | None = None) -> dict:
         """``disable_content_type_detection=True`` keeps a ``.gif`` a document: without it
         Telegram re-types the upload as an animation and delivers an MP4 transcode."""
         return self.upload("sendDocument",
                            {"document": (filename, path_or_bytes, _mime_for(filename))},
                            chat_id=chat_id, caption=caption, reply_markup=reply_markup,
-                           disable_content_type_detection=disable_content_type_detection)
+                           disable_content_type_detection=disable_content_type_detection,
+                           **_reply_params(reply_to_message_id))
 
     def edit_message_media(self, chat_id: int, message_id: int, path_or_bytes: bytes | str,
                            filename: str, caption: str | None = None,
@@ -235,6 +252,10 @@ class BotAPI:
     def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
         """``commands`` is a list of ``{"command": ..., "description": ...}``."""
         return self.call("setMyCommands", commands=commands)
+
+    def get_me(self) -> dict:
+        """The bot's own User object (``username`` lets a group's ``/cmd@name`` be told ours from another bot's)."""
+        return self.call("getMe")
 
     def get_file(self, file_id: str) -> dict:
         return self.call("getFile", file_id=file_id)

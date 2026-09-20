@@ -8,10 +8,13 @@ do not want parsed cleverly.
 
 Required keys: ``CLIPWRIGHT_BOT_TOKEN`` and ``CLIPWRIGHT_OWNER_ID``.
 Optional: ``CLIPWRIGHT_FRIEND_IDS`` (comma list of Telegram user ids),
+``CLIPWRIGHT_GROUP_IDS`` (comma list of chat ids; when set, the only groups
+the bot works in — unset, it works in any group it is added to),
 ``CLIPWRIGHT_HOME`` (state dir; the process environment wins over the file),
 and the numeric limits listed in ``_OPTIONAL`` — upload size, clip length and
-resolution, the daily export quota, the queue depth, the per-user disk
-budget and how many days an idle session is kept before its files go.
+resolution, the daily export quota, the daily render quota for group guests,
+the queue depth, the per-user disk budget and how many days an idle session
+is kept before its files go.
 
 The token lives here and nowhere else, so the file mode is checked: anything
 other than 0600 is logged as a warning (never an error — a mis-chmodded file
@@ -19,7 +22,8 @@ should still start the bot, loudly).
 
 Every numeric limit must be a finite, positive number (the integer ones at
 least 1): a zero queue depth or a ``nan`` duration cap would otherwise crash
-the daemon later or quietly switch a gate off. A ``ConfigError`` names the
+the daemon later or quietly switch a gate off. The one exception is the
+guest quota, where 0 is the switch: it turns group rendering off. A ``ConfigError`` names the
 key and the shape expected, never the value: whatever was pasted into
 ``CLIPWRIGHT_OWNER_ID`` by mistake may well be the token.
 
@@ -34,13 +38,14 @@ import logging
 import math
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 log = logging.getLogger("clipwrightd.config")
 
 ENV_FILE = "bot.env"
 REQUIRED = ("CLIPWRIGHT_BOT_TOKEN", "CLIPWRIGHT_OWNER_ID")
 OPTIONAL_LIST = "CLIPWRIGHT_FRIEND_IDS"
+GROUP_LIST = "CLIPWRIGHT_GROUP_IDS"
 EXPECTED_MODE = 0o600
 
 # env key -> (Config field, parser)
@@ -49,10 +54,12 @@ _OPTIONAL: dict[str, tuple[str, type]] = {
     "CLIPWRIGHT_MAX_DURATION_S": ("max_duration_s", float),
     "CLIPWRIGHT_MAX_DIM": ("max_dim", int),
     "CLIPWRIGHT_PER_DAY_QUOTA": ("per_day_quota", int),
+    "CLIPWRIGHT_GUEST_PER_DAY_QUOTA": ("guest_per_day_quota", int),
     "CLIPWRIGHT_QUEUE_DEPTH": ("queue_depth", int),
     "CLIPWRIGHT_MAX_USER_BYTES": ("max_user_bytes", int),
     "CLIPWRIGHT_RETENTION_DAYS": ("retention_days", float),
 }
+_ZERO_OK = {"CLIPWRIGHT_GUEST_PER_DAY_QUOTA"}       # 0 is meaningful here: group rendering off
 
 
 class ConfigError(ValueError):
@@ -69,9 +76,11 @@ class Config:
     max_duration_s: float = 60.0
     max_dim: int = 1920
     per_day_quota: int = 200
+    guest_per_day_quota: int = 10           # renders per day for a group member off the allowlist; 0 = groups off
     queue_depth: int = 8
     max_user_bytes: int = 1_000_000_000     # uploads + renders on disk, per user
     retention_days: float = 14.0            # idle sessions (and their un-exported uploads) expire after this
+    group_ids: set[int] = field(default_factory=set)   # groups served; empty = every group the bot is in
 
     @property
     def allowed(self) -> set[int]:
@@ -123,21 +132,24 @@ def _parse_ids(text: str, key: str) -> set[int]:
         try:
             ids.add(int(item))
         except ValueError:
-            raise ConfigError(f"{key}: expected a comma list of integer user ids") from None
+            raise ConfigError(f"{key}: expected a comma list of integer ids") from None
     return ids
 
 
-def _parse_number(values: dict[str, str], key: str, kind: type) -> int | float | None:
-    """A positive, finite ``kind`` (ints at least 1), or None when the key is unset."""
+def _parse_number(values: dict[str, str], key: str, kind: type, *,
+                  zero_ok: bool = False) -> int | float | None:
+    """A positive, finite ``kind`` (ints at least 1, or 0 too with ``zero_ok``), or None when the key is unset."""
     raw = values.get(key)
     if raw is None or raw == "":
         return None
-    shape = "a finite number above zero" if kind is float else "an integer of at least 1"
+    floor = 0 if zero_ok else 1
+    shape = "a finite number above zero" if kind is float else f"an integer of at least {floor}"
     try:
         number = kind(raw)
     except ValueError:
         raise ConfigError(f"{key}: expected {shape}") from None
-    if number <= 0 or (isinstance(number, float) and not math.isfinite(number)):
+    bad = (number <= 0 or not math.isfinite(number)) if kind is float else number < floor
+    if bad:
         raise ConfigError(f"{key}: expected {shape}")
     return number
 
@@ -185,7 +197,7 @@ def load_config(path: str | None = None) -> Config:
 
     extra: dict[str, int | float] = {}
     for key, (field_name, kind) in _OPTIONAL.items():
-        number = _parse_number(values, key, kind)
+        number = _parse_number(values, key, kind, zero_ok=key in _ZERO_OK)
         if number is not None:
             extra[field_name] = number
 
@@ -193,6 +205,7 @@ def load_config(path: str | None = None) -> Config:
         token=values["CLIPWRIGHT_BOT_TOKEN"],
         owner_id=owner_id,
         friend_ids=_parse_ids(values.get(OPTIONAL_LIST, ""), OPTIONAL_LIST),
+        group_ids=_parse_ids(values.get(GROUP_LIST, ""), GROUP_LIST),
         home=home,
         **extra,
     )

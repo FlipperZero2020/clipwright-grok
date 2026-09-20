@@ -35,16 +35,20 @@ from clipwrightd import poll as poll_mod
 from clipwrightd.api import BotAPI, BotAPIError
 from clipwrightd.config import Config
 from clipwrightd.keyboards import MAX_CB_BYTES, decode_cb
-from clipwrightd.poll import (CLIP_END, COMMANDS, GRID_TOAST, QUEUE_FULL, SEGMENT_CAP_S,
-                              SHUT_DOWN_MID_RENDER, STALE_BUTTON, STILL_RENDERING, Daemon,
-                              DaemonAlreadyRunning, main)
+from clipwrightd.poll import (ANON_HINT, CLIP_END, COMMANDS, GIF_HINT, GRID_TOAST, GROUP_OFF, GROUP_START,
+                              HELP_TEXT, NAG_COOLDOWN_S, QUEUE_FULL, SEGMENT_CAP_S, SHUT_DOWN_MID_RENDER,
+                              STALE_BUTTON, STILL_RENDERING, USERNAME_RETRY_S, Daemon, DaemonAlreadyRunning, main)
 from clipwrightd.queue import RenderQueue
 from clipwrightd.session import Store
 
 OWNER = 1001
 FRIEND = 1002
 STRANGER = 4242
+GUEST = 4243          # a group member off the allowlist
+GUEST2 = 4244
 CHAT = 555
+GROUP = -100777       # a supergroup the bot is in
+BOT_NAME = "clipwright_bot"             # as the daemon keeps it: lowercased from getMe's "Clipwright_Bot"
 CAP = 1_000_000
 COOKBOOK = recipe.load_cookbook()
 DAY_S = 86400.0
@@ -53,6 +57,14 @@ _ids = itertools.count(1)
 
 
 # -- fakes ----------------------------------------------------------------------
+
+class Spinning(BaseException):
+    """Raised by FakeAPI once a run() loop has polled an exhausted batch list too often.
+
+    A BaseException so the daemon's retry-on-Exception loop cannot swallow it;
+    the alternative was the poll loop growing ``calls`` until the VM ran out of memory.
+    """
+
 
 class FakeAPI:
     """Records every Bot API call; returns Telegram-shaped results; can fail on demand.
@@ -87,30 +99,38 @@ class FakeAPI:
 
     def get_updates(self, offset, timeout=50, allowed_updates=None):
         self._record("getUpdates", offset=offset, timeout=timeout)
-        batch = self.batches.pop(0) if self.batches else []
+        if not self.batches:                  # run() loops on empty batches: a spinning test must die, not eat RAM
+            self.idle_polls = getattr(self, "idle_polls", 0) + 1
+            if self.idle_polls > 50:          # BaseException: run() retries any Exception from get_updates
+                raise Spinning("daemon.run() kept polling after the fake batches ran out")
+            return []
+        batch = self.batches.pop(0)
         if isinstance(batch, BaseException):
             raise batch
         return batch
 
     def send_message(self, chat_id, text, reply_markup=None, reply_to_message_id=None, parse_mode=None):
-        self._record("sendMessage", chat_id=chat_id, text=text, reply_markup=reply_markup)
+        self._record("sendMessage", chat_id=chat_id, text=text, reply_markup=reply_markup,
+                     reply_to_message_id=reply_to_message_id)
         return {"message_id": self._next()}
 
-    def send_animation(self, chat_id, path_or_bytes, caption=None, reply_markup=None, filename="preview.mp4"):
+    def send_animation(self, chat_id, path_or_bytes, caption=None, reply_markup=None, filename="preview.mp4",
+                       reply_to_message_id=None):
         assert os.path.isfile(path_or_bytes), path_or_bytes
         self._record("sendAnimation", chat_id=chat_id, path=path_or_bytes, caption=caption,
-                     reply_markup=reply_markup, filename=filename)
+                     reply_markup=reply_markup, filename=filename, reply_to_message_id=reply_to_message_id)
         mid = self._next()
         return {"message_id": mid, "animation": {"file_id": f"A{mid}", "file_unique_id": f"UA{mid}"}}
 
     def send_document(self, chat_id, path_or_bytes, filename, caption=None, reply_markup=None,
-                      disable_content_type_detection=None):
+                      disable_content_type_detection=None, reply_to_message_id=None):
         assert os.path.isfile(path_or_bytes), path_or_bytes
         with open(path_or_bytes, "rb") as fh:
             content = fh.read()                # the daemon removes the file once it is sent
         self._record("sendDocument", chat_id=chat_id, path=path_or_bytes, filename=filename,
                      caption=caption, content=content,
-                     disable_content_type_detection=disable_content_type_detection)
+                     disable_content_type_detection=disable_content_type_detection,
+                     reply_to_message_id=reply_to_message_id)
         mid = self._next()
         doc = {"file_id": f"D{mid}", "file_unique_id": f"UD{mid}", "file_name": filename}
         self.sent_docs.append(doc)
@@ -133,6 +153,10 @@ class FakeAPI:
     def set_my_commands(self, commands):
         self._record("setMyCommands", commands=commands)
         return True
+
+    def get_me(self):
+        self._record("getMe")
+        return {"id": 42, "is_bot": True, "first_name": "Clipwright", "username": "Clipwright_Bot"}
 
     def get_file(self, file_id):
         self._record("getFile", file_id=file_id)
@@ -202,18 +226,38 @@ def _from(uid: int) -> dict:
     return {"id": uid, "is_bot": False, "first_name": "T"}
 
 
+def _chat(chat: int) -> dict:
+    return {"id": chat, "type": "supergroup" if chat < 0 else "private"}
+
+
 def msg(text: str | None = None, uid: int = OWNER, chat: int = CHAT, **extra: object) -> dict:
-    m: dict = {"message_id": next(_ids), "from": _from(uid), "chat": {"id": chat, "type": "private"}, "date": 0}
+    m: dict = {"message_id": next(_ids), "from": _from(uid), "chat": _chat(chat), "date": 0}
     if text is not None:
         m["text"] = text
     m.update(extra)
     return {"update_id": next(_ids), "message": m}
 
 
+def gmsg(text: str | None = None, uid: int = GUEST, **extra: object) -> dict:
+    """A message in the GROUP (a supergroup), from a guest unless told otherwise."""
+    return msg(text, uid=uid, chat=GROUP, **extra)
+
+
+def answer(text: str, uid: int = GUEST, bot: str = "Clipwright_Bot", chat: int = GROUP) -> dict:
+    """A reply to one of the bot's force-reply prompts, as a client sends it (in the GROUP by default)."""
+    prompt = {"message_id": next(_ids), "from": {"id": 42, "is_bot": True, "username": bot}, "text": "Send the …"}
+    return msg(text, uid=uid, chat=chat, reply_to_message=prompt)
+
+
+def gif_cmd(uid: int = GUEST, chat: int = GROUP, text: str = "/gif", **kw: object) -> dict:
+    """``/gif`` in reply to a video message in ``chat``."""
+    return msg(text, uid=uid, chat=chat, reply_to_message={"message_id": next(_ids), **video(**kw)})
+
+
 def cb(data: str, uid: int = OWNER, chat: int = CHAT, message_id: int = 101) -> dict:
     return {"update_id": next(_ids), "callback_query": {
         "id": f"cq{next(_ids)}", "from": _from(uid), "data": data,
-        "message": {"message_id": message_id, "chat": {"id": chat, "type": "private"}}}}
+        "message": {"message_id": message_id, "chat": _chat(chat)}}}
 
 
 def video(size: int = 5000, mime: str = "video/mp4", key: str = "video") -> dict:
@@ -297,6 +341,13 @@ def upload(daemon: Daemon, api: FakeAPI, uid: int = OWNER, **kw: object) -> str:
     return token_of(api.of("sendAnimation")[-1]["reply_markup"])
 
 
+def gif_in_group(daemon: Daemon, api: FakeAPI, uid: int = GUEST, **kw: object) -> tuple[str, int]:
+    """``/gif`` on a video in the GROUP; return (session token, the /gif message's id)."""
+    update = gif_cmd(uid=uid, **kw)
+    daemon.handle_update(update)
+    return token_of(api.of("sendAnimation")[-1]["reply_markup"]), update["message"]["message_id"]
+
+
 @pytest.fixture
 def park(daemon):
     """A callable that swaps in a threaded depth-1 queue with its worker parked on OWNER's job.
@@ -351,6 +402,413 @@ def test_non_video_message_gets_a_hint(daemon, api):
     daemon.handle_update(msg(sticker={"file_id": "s"}))
     daemon.handle_update(msg("just some words"))
     assert all("video" in t for t in api.texts()) and len(api.texts()) == 2
+
+
+# -- groups: /gif, guests, replies ------------------------------------------------------
+
+SOMEONE_ELSE = "That's someone else's session."
+
+
+def test_group_gif_from_a_guest_downloads_probes_and_previews_as_a_reply(daemon, api, store, cook, probe):
+    token, asked = gif_in_group(daemon, api)             # GUEST is not on the allowlist
+
+    (dl,) = api.of("downloadFile")
+    assert api.of("getFile") == [{"file_id": "vid1"}] and dl["max_bytes"] == CAP
+    assert os.path.dirname(dl["dest"]) == os.path.join(daemon.home, "uploads", str(GUEST))
+    assert probe.paths == [dl["dest"]]
+    sess = store.get(token)
+    assert (sess.user_id, sess.chat_id, sess.origin_message_id) == (GUEST, GROUP, asked)
+    assert sess.recipe["input"] == dl["dest"] and cook.calls[-1][2] is True
+
+    (sent,) = api.of("sendAnimation")
+    assert sent["chat_id"] == GROUP and sent["reply_to_message_id"] == asked
+    assert sess.message_id == 101                  # the preview lives in the group message
+    rows = keyboard_of(sent["reply_markup"])
+    assert [b["text"] for b in rows[0]] == ["🪃 boomerang", "💬 caption-loop", "• 🎞️ gifify"]
+    assert [b["text"] for b in rows[-1]] == ["↩ Undo", "⌘ Show CLI", "⬇ Export", "🎲 Grid"]
+    assert all(decode_cb(b["callback_data"]).session == token for row in rows for b in row)
+    assert api.texts() == []
+    assert all(b["chat_id"] == GROUP for b in api.of("sendChatAction"))
+
+
+def test_group_ignores_everything_that_is_not_a_command(daemon, api):
+    daemon.handle_update(gmsg(**video()))                    # a bare video, even from a guest ...
+    daemon.handle_update(gmsg(uid=OWNER, **video()))         # ... or the owner: a room, not an inbox
+    daemon.handle_update(gmsg("just some words"))
+    daemon.handle_update(gmsg("just some words", uid=OWNER))
+    daemon.handle_update(gmsg(sticker={"file_id": "s"}))
+    daemon.handle_update(gmsg(new_chat_members=[_from(GUEST2)]))
+    channel = msg("/start")
+    channel["message"]["chat"] = {"id": -200, "type": "channel"}
+    daemon.handle_update(channel)
+    assert api.calls == []
+
+
+def test_a_guest_is_still_a_stranger_in_a_dm(daemon, api, caplog):
+    gif_in_group(daemon, api)                                # served in the group ...
+    served = len(api.calls)
+    with caplog.at_level(logging.WARNING, logger="clipwrightd.poll"):
+        daemon.handle_update(msg("/start", uid=GUEST))       # ... and nobody in a DM
+        daemon.handle_update(msg(uid=GUEST, **video()))
+        daemon.handle_update(gif_cmd(uid=GUEST, chat=CHAT))
+        daemon.handle_update(cb("a/AAAAAA/grid", uid=GUEST, chat=CHAT))
+    assert len(api.calls) == served
+    assert sum("non-allowlisted" in r.getMessage() for r in caplog.records) == 1
+
+
+def charged(store: Store, uid: int) -> int:
+    """What the quota has counted for ``uid``: renders, and refusals too (it counts before comparing)."""
+    return store._conn.execute("SELECT COALESCE(SUM(count), 0) AS n FROM quota WHERE user_id = ?",
+                               (uid,)).fetchone()["n"]
+
+
+def test_guest_quota_refuses_the_spent_before_a_byte_and_never_charges_the_owner(
+        daemon, api, store, cook, caplog):
+    daemon.config.guest_per_day_quota = 2
+    with caplog.at_level(logging.INFO, logger="clipwrightd.poll"):
+        token, _ = gif_in_group(daemon, api)                                   # render 1
+        big = gif_cmd(size=CAP + 1)
+        daemon.handle_update(big)                                              # refused for size: not a render
+        assert "Trim it and resend" in api.texts()[-1]
+        assert api.of("sendMessage")[-1]["reply_to_message_id"] == big["message"]["message_id"]
+        assert len(api.of("getFile")) == 1 and charged(store, GUEST) == 1     # the charge comes after every gate
+        daemon.handle_update(cb(f"c/{token}/3/1", uid=GUEST, chat=GROUP))      # render 2
+    guest_lines = [r.getMessage() for r in caplog.records if "guest render" in r.getMessage()]
+    assert len(guest_lines) == 2 and all(str(GUEST) in ln and str(GROUP) in ln for ln in guest_lines)
+    fetched, cooks = len(api.of("getFile")), len(cook.calls)
+    spent = "You've used today's 2 renders — try again tomorrow."
+
+    third = gif_cmd()
+    daemon.handle_update(third)
+    assert api.texts()[-1] == spent
+    assert api.of("sendMessage")[-1]["reply_to_message_id"] == third["message"]["message_id"]
+    daemon.handle_update(cb(f"c/{token}/0/1", uid=GUEST, chat=GROUP))
+    assert api.of("answerCallbackQuery")[-1]["text"] == spent
+    assert store.get(token).recipe["fps"] == recipe.defaults(COOKBOOK["gifify"])["fps"]
+    assert len(api.of("getFile")) == fetched and len(cook.calls) == cooks
+    assert len(os.listdir(os.path.join(daemon.home, "uploads", str(GUEST)))) == 1   # the refusal cost no disk
+
+    # the owner in the same group is served as in a DM: previews free, exports on per_day_quota
+    mine, _ = gif_in_group(daemon, api, uid=OWNER)
+    daemon.handle_update(cb(f"c/{mine}/3/1", uid=OWNER, chat=GROUP))
+    daemon.handle_update(cb(f"c/{mine}/3/2", uid=OWNER, chat=GROUP))
+    daemon.handle_update(cb(f"a/{mine}/export", uid=OWNER, chat=GROUP))
+    assert len(api.of("sendDocument")) == 2 and len(cook.calls) == cooks + 4
+    daemon.handle_update(cb(f"a/{mine}/export", uid=OWNER, chat=GROUP))
+    assert api.of("answerCallbackQuery")[-1]["text"] == "Daily export limit reached."
+    assert charged(store, OWNER) == 2 and charged(store, GUEST) == 4        # exports vs renders; refusals count too
+
+
+def test_every_guest_render_counts_once(daemon, api, store, cook):
+    daemon.config.guest_per_day_quota = 6
+    counts = []
+    for update in (gif_cmd(),                                                      # 1: preview
+                   None,                                                           # (token known from here)
+                   cb("c/{t}/3/1", uid=GUEST, chat=GROUP),                         # 2: knob
+                   cb("r/{t}/caption-loop", uid=GUEST, chat=GROUP),                # 3: recipe switch
+                   cb("t/{t}/0", uid=GUEST, chat=GROUP),                           # a prompt is not a render
+                   answer("hello there"),                                          # 4: text knob
+                   cb("a/{t}/undo", uid=GUEST, chat=GROUP),                        # 5: undo
+                   cb("a/{t}/export", uid=GUEST, chat=GROUP)):                     # 6: export
+        if update is None:
+            token = token_of(api.of("sendAnimation")[-1]["reply_markup"])
+            continue
+        if "callback_query" in update:
+            update["callback_query"]["data"] = update["callback_query"]["data"].format(t=token)
+        daemon.handle_update(update)
+        counts.append(charged(store, GUEST))
+    assert counts == [1, 2, 3, 3, 4, 5, 6]                                       # each kind exactly once
+    assert len(cook.calls) == 6 and len(api.of("sendDocument")) == 2
+    assert store.get(token).recipe["caption"]["text"] == "" and store.get(token).undo != []
+    assert [kw["text"] for kw in api.of("answerCallbackQuery")] == ["Rendering…", "Rendering…", None,
+                                                                    "Rendering…", "Rendering…"]
+
+    spent = "You've used today's 6 renders — try again tomorrow."
+    daemon.handle_update(cb(f"c/{token}/1/1", uid=GUEST, chat=GROUP))              # 7 (size +): over
+    assert api.of("answerCallbackQuery")[-1]["text"] == spent and len(cook.calls) == 6
+    daemon.handle_update(cb(f"t/{token}/0", uid=GUEST, chat=GROUP))                # the prompt still opens ...
+    daemon.handle_update(answer("late words"))                                     # ... but its answer is refused
+    assert api.texts()[-1] == spent and daemon._pending_text == {} and len(cook.calls) == 6
+    assert store.get(token).recipe["caption"]["text"] == ""
+    daemon.handle_update(cb(f"a/{token}/export", uid=GUEST, chat=GROUP))
+    assert api.of("answerCallbackQuery")[-1]["text"] == spent and len(api.of("sendDocument")) == 2
+    before = store.get(token)
+    daemon.handle_update(cb(f"r/{token}/boomerang", uid=GUEST, chat=GROUP))        # a spent switch ...
+    daemon.handle_update(cb(f"a/{token}/undo", uid=GUEST, chat=GROUP))             # ... and undo are refused too
+    assert [kw["text"] for kw in api.of("answerCallbackQuery")[-2:]] == [spent, spent]
+    assert store.get(token) == before and len(cook.calls) == 6
+
+
+def test_guest_quota_zero_turns_group_rendering_off_for_guests_only(daemon, api, store, cook):
+    token, _ = gif_in_group(daemon, api)
+    daemon.config.guest_per_day_quota = 0
+    asked = gif_cmd()
+    daemon.handle_update(asked)
+    assert api.texts()[-1] == GROUP_OFF
+    assert api.of("sendMessage")[-1]["reply_to_message_id"] == asked["message"]["message_id"]
+    daemon.handle_update(cb(f"c/{token}/3/1", uid=GUEST, chat=GROUP))
+    assert api.of("answerCallbackQuery")[-1]["text"] == GROUP_OFF
+    daemon.handle_update(cb(f"a/{token}/export", uid=GUEST, chat=GROUP))
+    assert api.of("answerCallbackQuery")[-1]["text"] == GROUP_OFF
+    assert len(api.of("getFile")) == 1 and len(cook.calls) == 1 and api.of("sendDocument") == []
+    assert store.get(token).recipe["loop"] == "seamless"
+
+    gif_in_group(daemon, api, uid=FRIEND)                    # the allowlist is not a guest
+    assert len(api.of("sendAnimation")) == 2
+
+
+def test_group_buttons_belong_to_whoever_sent_gif(daemon, api, store, cook):
+    token, _ = gif_in_group(daemon, api)
+    cooks = len(cook.calls)
+    daemon.handle_update(cb(f"c/{token}/3/1", uid=GUEST2, chat=GROUP))
+    daemon.handle_update(cb(f"a/{token}/export", uid=OWNER, chat=GROUP))    # not even the owner
+    daemon.handle_update(cb(f"t/{token}/0", uid=GUEST2, chat=GROUP))
+    assert [kw["text"] for kw in api.of("answerCallbackQuery")] == [SOMEONE_ELSE] * 3
+    assert store.get(token).recipe["loop"] == "seamless" and len(cook.calls) == cooks
+    assert api.of("sendDocument") == [] and api.texts() == [] and daemon._pending_text == {}
+
+    daemon.handle_update(cb(f"c/{token}/3/1", uid=GUEST, chat=GROUP))
+    assert api.of("answerCallbackQuery")[-1]["text"] == "Rendering…"
+    assert store.get(token).recipe["loop"] == "boomerang" and len(cook.calls) == cooks + 1
+    (edit,) = api.of("editMessageMedia")
+    assert edit["chat_id"] == GROUP and edit["message_id"] == store.get(token).message_id
+
+
+def test_group_text_prompts_are_per_user_and_reply_to_each_gif(daemon, api, store, cook):
+    first, asked1 = gif_in_group(daemon, api, uid=GUEST)
+    second, asked2 = gif_in_group(daemon, api, uid=GUEST2)
+    for token, uid in ((first, GUEST), (second, GUEST2)):
+        daemon.handle_update(cb(f"r/{token}/caption-loop", uid=uid, chat=GROUP))
+        daemon.handle_update(cb(f"t/{token}/0", uid=uid, chat=GROUP))
+    prompts = api.of("sendMessage")
+    assert [p["reply_to_message_id"] for p in prompts] == [asked1, asked2]
+    assert all(p["reply_markup"]["force_reply"] is True and p["reply_markup"]["selective"] is True for p in prompts)
+    assert daemon._pending_text == {(GROUP, GUEST): (first, 0), (GROUP, GUEST2): (second, 0)}
+
+    calls = len(api.calls)
+    daemon.handle_update(gmsg("not mine", uid=4245))         # a member with no prompt open: not a word
+    daemon.handle_update(gmsg("not mine", uid=OWNER))
+    assert len(api.calls) == calls and daemon._pending_text != {}
+
+    # with privacy mode off the bot hears everything: only a reply to our prompt is an answer
+    daemon.username = BOT_NAME
+    spent = charged(store, GUEST)
+    daemon.handle_update(gmsg("lol same", uid=GUEST))                            # chatter to a friend
+    daemon.handle_update(msg("lol", uid=GUEST, chat=GROUP, reply_to_message={"message_id": 5, "from": _from(GUEST2)}))
+    daemon.handle_update(answer("wrong bot", uid=GUEST, bot="OtherBot"))
+    assert len(api.calls) == calls and charged(store, GUEST) == spent           # not an answer, not a render
+    assert daemon._pending_text == {(GROUP, GUEST): (first, 0), (GROUP, GUEST2): (second, 0)}
+
+    daemon.handle_update(answer("theirs", uid=GUEST2))
+    daemon.handle_update(answer("mine", uid=GUEST))
+    assert store.get(first).recipe["caption"]["text"] == "mine"
+    assert store.get(second).recipe["caption"]["text"] == "theirs"
+    assert [c[0]["caption"]["text"] for c in cook.calls[-2:]] == ["theirs", "mine"]
+    assert daemon._pending_text == {} and len(api.of("sendMessage")) == 2      # the two prompts; no chatter
+    assert len(api.of("editMessageMedia")) == 4                                 # two recipe switches, two captions
+
+
+def test_group_unknown_commands_are_left_alone_unless_addressed_to_us(daemon, api):
+    daemon.username = daemon._bot_username()                  # as run() fetches it: getMe's "Clipwright_Bot"
+    assert daemon.username == BOT_NAME and api.of("getMe") == [{}]
+    api.calls.clear()
+    daemon.handle_update(gmsg("/foo"))
+    daemon.handle_update(gmsg("/foo@otherbot"))
+    daemon.handle_update(gmsg("/help@otherbot"))
+    daemon.handle_update(gif_cmd(text="/gif@otherbot"))
+    assert api.calls == []
+
+    ours = gmsg(f"/foo@{BOT_NAME}")
+    daemon.handle_update(ours)
+    assert "/foo" in api.texts()[-1]
+    assert api.of("sendMessage")[-1]["reply_to_message_id"] == ours["message"]["message_id"]
+    daemon.handle_update(gmsg("/Help@Clipwright_Bot"))       # Telegram's case, not ours
+    assert api.texts()[-1] == HELP_TEXT
+    _token, asked = gif_in_group(daemon, api, text=f"/gif@{BOT_NAME}")
+    assert api.of("sendAnimation")[-1]["reply_to_message_id"] == asked
+
+    daemon.handle_update(msg("/foo"))                        # a DM answers as it always did
+    assert "/foo" in api.texts()[-1] and api.of("sendMessage")[-1]["reply_to_message_id"] is None
+
+
+def test_gif_that_is_not_a_reply_to_a_video_gets_the_hint(daemon, api):
+    bare = gmsg("/gif")
+    words = gmsg("/gif", uid=GUEST2, reply_to_message={"message_id": next(_ids), "text": "lol"})
+    daemon.handle_update(bare)
+    daemon.handle_update(words)
+    daemon.handle_update(msg("/gif"))
+    assert api.texts() == [GIF_HINT] * 3
+    assert [kw["reply_to_message_id"] for kw in api.of("sendMessage")] == [
+        bare["message"]["message_id"], words["message"]["message_id"], None]
+    assert api.of("getFile") == []
+
+
+def test_gif_in_a_dm_is_an_upload_without_reply_threading(daemon, api, store):
+    daemon.handle_update(gif_cmd(uid=OWNER, chat=CHAT))
+    (sent,) = api.of("sendAnimation")
+    token = token_of(sent["reply_markup"])
+    assert sent["chat_id"] == CHAT and sent["reply_to_message_id"] is None
+    assert store.get(token).origin_message_id is None
+    daemon.handle_update(cb(f"a/{token}/export"))
+    assert [kw["reply_to_message_id"] for kw in api.of("sendDocument")] == [None, None]
+    daemon.handle_update(cb(f"a/{token}/cli"))
+    daemon.handle_update(cb(f"r/{token}/caption-loop"))
+    daemon.handle_update(cb(f"t/{token}/0"))
+    cli, prompt = api.of("sendMessage")
+    assert cli["text"].startswith("clipwright cook") and prompt["reply_markup"]["force_reply"] is True
+    assert [kw["reply_to_message_id"] for kw in api.of("sendMessage")] == [None, None]
+
+
+def test_group_start_help_recipes_reply_to_the_asker(daemon, api):
+    asks = [gmsg("/start"), gmsg("/help", uid=OWNER), gmsg("/recipes", uid=GUEST2)]
+    for update in asks:
+        daemon.handle_update(update)
+    start, help_, recipes = api.of("sendMessage")
+    assert start["text"] == GROUP_START and "/gif" in GROUP_START
+    assert help_["text"] == HELP_TEXT and "In groups" in HELP_TEXT and "/gif" in HELP_TEXT
+    assert "gifify" in recipes["text"] and "caption-loop" in recipes["text"]
+    assert [kw["chat_id"] for kw in api.of("sendMessage")] == [GROUP] * 3
+    assert [kw["reply_to_message_id"] for kw in api.of("sendMessage")] == [u["message"]["message_id"] for u in asks]
+    assert {"command": "gif", "description": "Reply to a video in a group to GIF it"} in COMMANDS
+
+
+def test_everything_a_group_session_sends_replies_to_its_gif(daemon, api, store, cook, probe):
+    token, asked = gif_in_group(daemon, api)
+    daemon.handle_update(cb(f"a/{token}/cli", uid=GUEST, chat=GROUP))
+    daemon.handle_update(cb(f"r/{token}/caption-loop", uid=GUEST, chat=GROUP))
+    daemon.handle_update(cb(f"t/{token}/0", uid=GUEST, chat=GROUP))
+    too_long = answer("x" * 61)
+    daemon.handle_update(too_long)                           # the retry prompt replies to the words themselves
+    daemon.handle_update(cb(f"a/{token}/export", uid=GUEST, chat=GROUP))
+    cook.fail = RuntimeError("palette exploded")
+    daemon.handle_update(cb(f"c/{token}/1/1", uid=GUEST, chat=GROUP))
+
+    assert api.of("sendAnimation")[0]["reply_to_message_id"] == asked
+    gif_doc, sidecar_doc = api.of("sendDocument")
+    assert gif_doc["reply_to_message_id"] == asked and sidecar_doc["reply_to_message_id"] == asked
+    cli, prompt, retry, failed = api.of("sendMessage")
+    assert cli["text"].startswith("clipwright cook") and cli["reply_to_message_id"] == asked
+    assert prompt["reply_markup"]["force_reply"] is True and prompt["reply_to_message_id"] == asked
+    assert "over the 60 limit" in retry["text"] and retry["reply_to_message_id"] == too_long["message"]["message_id"]
+    assert "didn't work out" in failed["text"] and failed["reply_to_message_id"] == asked
+
+    probe.fail = FFmpegError(["ffprobe", "x"], "moov atom not found", 1)
+    second = gif_cmd(uid=GUEST2)
+    daemon.handle_update(second)                             # an ingest refusal replies to that /gif
+    assert "couldn't read that as a video" in api.texts()[-1]
+    assert api.of("sendMessage")[-1]["reply_to_message_id"] == second["message"]["message_id"]
+
+
+def test_run_fetches_the_bot_username_once(daemon, api):
+    api.batches = [[gmsg(f"/foo@{BOT_NAME}")]]
+    assert daemon.run(once=True) == 0
+    assert daemon.username == BOT_NAME and api.of("getMe") == [{}]
+    assert "/foo" in api.texts()[-1]
+
+
+def test_getme_failure_leaves_addressed_commands_to_other_bots(daemon, api, caplog):
+    api.fail["getMe"] = BotAPIError("getMe: Bad Gateway", 502)
+    api.batches = [[gmsg(f"/foo@{BOT_NAME}"), gmsg(f"/help@{BOT_NAME}"), gmsg("/help"), msg(f"/help@{BOT_NAME}")]]
+    with caplog.at_level(logging.WARNING, logger="clipwrightd.poll"):
+        assert daemon.run(once=True) == 0
+    assert daemon.username is None
+    assert any("getMe failed" in r.getMessage() for r in caplog.records)
+    assert [kw["chat_id"] for kw in api.of("sendMessage")] == [GROUP, CHAT]   # only the unaddressed forms
+    assert all(t == HELP_TEXT for t in api.texts())
+    assert len(api.of("getMe")) == 1            # the addressed commands arrived within the retry cooldown
+
+
+def test_failed_startup_getme_is_retried_for_the_next_addressed_command(daemon, api):
+    """A getMe that failed at boot must not silence every menu-tapped /gif@bot until a restart."""
+    now = [1000.0]
+    daemon.clock = lambda: now[0]
+    api.fail["getMe"], api.fail_at["getMe"] = BotAPIError("getMe: Bad Gateway", 502), 1
+    api.batches = [[gmsg("/help")]]
+    assert daemon.run(once=True) == 0 and daemon.username is None
+    daemon.handle_update(gmsg(f"/help@{BOT_NAME}"))               # too soon: no retry, still not ours
+    assert len(api.of("getMe")) == 1 and len(api.texts()) == 1
+    now[0] += USERNAME_RETRY_S
+    _token, asked = gif_in_group(daemon, api, text=f"/gif@{BOT_NAME}")
+    assert daemon.username == BOT_NAME and len(api.of("getMe")) == 2
+    assert api.of("sendAnimation")[-1]["reply_to_message_id"] == asked
+
+
+def test_interrupt_during_the_startup_getme_still_shuts_down_cleanly(daemon, api, caplog):
+    """A Ctrl-C while getMe hangs takes the same path as one during a poll: exit 0, pidfile released."""
+    api.fail["getMe"] = KeyboardInterrupt()
+    with caplog.at_level(logging.INFO, logger="clipwrightd.poll"):
+        assert daemon.run(once=True) == 0
+    assert daemon._pidfile is None and api.of("getUpdates") == []
+    assert any("interrupted" in r.getMessage() for r in caplog.records)
+
+
+def test_group_ids_restrict_the_bot_to_the_groups_it_was_given(daemon, api, store, caplog):
+    other = -100999
+    daemon.config.group_ids = {GROUP}
+    with caplog.at_level(logging.WARNING, logger="clipwrightd.poll"):
+        for update in (gif_cmd(chat=other), gif_cmd(uid=OWNER, chat=other), msg("/help", uid=OWNER, chat=other),
+                       cb("a/AAAAAA/grid", uid=OWNER, chat=other)):
+            daemon.handle_update(update)
+    assert api.calls == [] and store.session_tokens() == set()
+    assert sum(str(other) in r.getMessage() and "CLIPWRIGHT_GROUP_IDS" in r.getMessage() for r in caplog.records) == 1
+    gif_in_group(daemon, api)                                 # the listed group, as before
+    assert len(api.of("sendAnimation")) == 1
+
+    daemon.config.group_ids = set()                           # unset: any group the bot is in
+    gif_in_group(daemon, api, chat=other)
+    assert api.of("sendAnimation")[-1]["chat_id"] == other
+
+
+def test_anonymous_admins_and_channels_are_not_served(daemon, api, store, cook):
+    """Telegram gives every anonymous admin one from.id (and every channel poster another): no sessions there."""
+    anon = {"id": 1087968824, "is_bot": True, "first_name": "Group", "username": "GroupAnonymousBot"}
+    as_channel = {"id": 136817688, "is_bot": True, "first_name": "Channel", "username": "Channel_Bot"}
+    asked = gif_cmd()
+    asked["message"]["from"], asked["message"]["sender_chat"] = anon, _chat(GROUP)
+    daemon.handle_update(asked)
+    assert api.texts() == [ANON_HINT]
+    assert api.of("sendMessage")[-1]["reply_to_message_id"] == asked["message"]["message_id"]
+    posted = gif_cmd(uid=OWNER)                               # even the owner, posting as a channel
+    posted["message"]["from"], posted["message"]["sender_chat"] = as_channel, {"id": -1009, "type": "channel"}
+    daemon.handle_update(posted)
+    assert api.texts() == [ANON_HINT] * 2 and api.of("getFile") == [] and cook.calls == []
+    assert store.session_tokens() == set()
+    daemon.handle_update(copy.deepcopy(asked))                # the hint is rate-limited like a guest's
+    assert len(api.texts()) == 2
+
+    quiet = len(api.calls)
+    for update in (gmsg("/help"), gmsg("hello"), gmsg(**video()), msg("/gif", uid=OWNER)):
+        update["message"]["from"] = dict(anon)
+        daemon.handle_update(update)
+    forwarded = gmsg("/help")
+    forwarded["message"]["from"] = {"id": 777000, "is_bot": False, "first_name": "Telegram"}
+    daemon.handle_update(forwarded)
+    press = cb("a/AAAAAA/grid", uid=OWNER, chat=GROUP)
+    press["callback_query"]["from"] = dict(anon)
+    daemon.handle_update(press)
+    assert len(api.calls) == quiet                            # anything else from them: not a word
+
+
+def test_a_guests_hints_are_rate_limited_per_chat(daemon, api, store):
+    """Hints cost a guest nothing, so a loop of /gif would otherwise burn the group's send allowance."""
+    now = [5000.0]
+    daemon.clock = lambda: now[0]
+    daemon.config.guest_per_day_quota = 1
+    gif_in_group(daemon, api)
+    for _ in range(3):
+        daemon.handle_update(gmsg("/gif"))
+        daemon.handle_update(gmsg("/help"))
+        daemon.handle_update(gif_cmd())                       # spent: refused, once
+    spent = "You've used today's 1 renders — try again tomorrow."
+    assert api.texts() == [GIF_HINT, HELP_TEXT, spent]        # each once a minute per person and chat
+    daemon.handle_update(gmsg("/gif", uid=GUEST2))            # another member is not the same person
+    daemon.handle_update(gmsg("/gif", uid=OWNER))             # the allowlist is never throttled
+    daemon.handle_update(gmsg("/gif", uid=OWNER))
+    assert api.texts()[3:] == [GIF_HINT] * 3
+    now[0] += NAG_COOLDOWN_S
+    daemon.handle_update(gmsg("/gif"))
+    assert api.texts()[-1] == GIF_HINT and len(api.texts()) == 7
+    assert charged(store, GUEST) == 4                         # each refused /gif was counted; no hint ever was
 
 
 # -- uploads -----------------------------------------------------------------------
@@ -822,7 +1280,7 @@ def test_text_reply_from_another_user_is_not_taken(daemon, api, store, caption_s
     daemon.handle_update(cb(f"t/{caption_session}/0", message_id=777))
     daemon.handle_update(msg("hijack", uid=FRIEND))
     assert store.get(caption_session).recipe["caption"]["text"] == ""
-    assert "someone else" in api.texts()[-1]
+    assert "Send me a video" in api.texts()[-1]      # prompts are keyed per user: FRIEND has none pending
     daemon.handle_update(msg("mine"))                # the owner's prompt is still pending
     assert store.get(caption_session).recipe["caption"]["text"] == "mine"
 
@@ -873,7 +1331,7 @@ def test_text_reply_while_busy_keeps_the_prompt(daemon, api, store, cook, captio
     reply = api.of("sendMessage")[-1]
     assert reply["text"] == STILL_RENDERING and reply["reply_markup"]["force_reply"] is True
     assert store.get(token).recipe["caption"]["text"] == "" and store.get(token).undo == []
-    assert daemon._pending_text == {CHAT: (token, 0)} and cook.calls == []
+    assert daemon._pending_text == {(CHAT, OWNER): (token, 0)} and cook.calls == []
 
     release(daemon, gate)
     daemon.handle_update(msg("my sprint velocity"))
@@ -1010,10 +1468,10 @@ def test_offset_is_saved_per_update_so_an_interrupted_batch_replays_only_the_one
     api.batches = [batch]
     real = daemon._handle_command
 
-    def interrupted(command, *a):
+    def interrupted(command, *a, **kw):
         if command == "help":
             raise KeyboardInterrupt             # Ctrl-C lands while the second update is being handled
-        real(command, *a)
+        real(command, *a, **kw)
 
     monkeypatch.setattr(daemon, "_handle_command", interrupted)
     assert daemon.run() == 0
@@ -1096,6 +1554,22 @@ def test_shutdown_waits_for_the_running_render_and_tells_the_queued(daemon, api,
     assert gate.is_set() and daemon.queue.size == 0
     assert api.texts()[-1].startswith("I'm shutting down") and api.of("sendMessage")[-1]["chat_id"] == CHAT
     assert len(api.of("editMessageMedia")) == 0   # FRIEND's render never ran
+
+
+def test_shutdown_notice_for_a_queued_group_press_replies_to_the_gif(daemon, api, store, cook):
+    token, asked = gif_in_group(daemon, api)
+    gate = threading.Event()
+    daemon.queue = RenderQueue(depth=3)
+    daemon.queue.submit(OWNER, gate.wait)
+    daemon.handle_update(cb(f"a/{token}/export", uid=GUEST, chat=GROUP))
+    assert api.of("answerCallbackQuery")[-1]["text"] == "Queued — #2 in line."
+
+    threading.Timer(0.05, gate.set).start()
+    daemon._shutdown()
+    notice = api.of("sendMessage")[-1]
+    assert notice["text"].startswith("I'm shutting down")
+    assert (notice["chat_id"], notice["reply_to_message_id"]) == (GROUP, asked)
+    assert api.of("sendDocument") == []
 
 
 def test_render_that_dies_during_shutdown_is_not_blamed_on_the_clip(daemon, api, store, cook):

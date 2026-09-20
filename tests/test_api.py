@@ -109,8 +109,38 @@ def test_send_message_posts_json(bot: BotAPI, rec: Recorder) -> None:
     assert call.headers == {"Content-Type": "application/json"}
     assert call.timeout == DEFAULT_TIMEOUT == 65
     assert call.json == {"chat_id": 42, "text": "hi ☕", "reply_markup": markup,
-                         "reply_to_message_id": 7}          # parse_mode=None dropped
+                         "reply_to_message_id": 7,          # parse_mode=None dropped
+                         "allow_sending_without_reply": True}
     assert result == {"message_id": 1}
+
+
+def test_a_reply_send_survives_the_deletion_of_its_target(bot: BotAPI, rec: Recorder) -> None:
+    """Every reply carries allow_sending_without_reply; a plain send carries neither field.
+
+    A group session replies to its ``/gif`` for life; once that message is
+    deleted, Telegram would 400 every later send without the flag.
+    """
+    bot.send_message(42, "plain")
+    assert rec.last.json == {"chat_id": 42, "text": "plain"}
+    bot.send_message(42, "threaded", reply_to_message_id=7)
+    assert rec.last.json == {"chat_id": 42, "text": "threaded", "reply_to_message_id": 7,
+                             "allow_sending_without_reply": True}
+
+    bot.send_animation(42, b"\x00mp4", reply_to_message_id=7)
+    parts = parse_multipart(rec.last.data, boundary_of(rec.last))
+    assert parts["reply_to_message_id"]["content"] == b"7"
+    assert parts["allow_sending_without_reply"]["content"] == b"true"
+    bot.send_animation(42, b"\x00mp4")
+    parts = parse_multipart(rec.last.data, boundary_of(rec.last))
+    assert "reply_to_message_id" not in parts and "allow_sending_without_reply" not in parts
+
+    bot.send_document(42, b"GIF89a", "loop.gif", reply_to_message_id=7)
+    parts = parse_multipart(rec.last.data, boundary_of(rec.last))
+    assert parts["reply_to_message_id"]["content"] == b"7"
+    assert parts["allow_sending_without_reply"]["content"] == b"true"
+    bot.send_document(42, b"GIF89a", "loop.gif")
+    parts = parse_multipart(rec.last.data, boundary_of(rec.last))
+    assert "reply_to_message_id" not in parts and "allow_sending_without_reply" not in parts
 
 
 def test_custom_base_url() -> None:
@@ -655,8 +685,11 @@ def test_load_config_missing_file(tmp_path) -> None:
 @pytest.mark.parametrize("text, fragment", [
     (f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=owner\n", "CLIPWRIGHT_OWNER_ID"),
     (f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\nCLIPWRIGHT_FRIEND_IDS=2,bob\n", "CLIPWRIGHT_FRIEND_IDS"),
+    (f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\nCLIPWRIGHT_GROUP_IDS=-100,lounge\n", "CLIPWRIGHT_GROUP_IDS"),
     (f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\nCLIPWRIGHT_QUEUE_DEPTH=many\n", "CLIPWRIGHT_QUEUE_DEPTH"),
     (f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\nCLIPWRIGHT_RETENTION_DAYS=soon\n", "CLIPWRIGHT_RETENTION_DAYS"),
+    (f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\nCLIPWRIGHT_GUEST_PER_DAY_QUOTA=x\n",
+     "CLIPWRIGHT_GUEST_PER_DAY_QUOTA"),
 ])
 def test_load_config_bad_numbers(tmp_path, text, fragment) -> None:
     path = write_env(tmp_path, text)
@@ -672,6 +705,8 @@ def test_load_config_bad_numbers(tmp_path, text, fragment) -> None:
     "CLIPWRIGHT_MAX_DURATION_S=inf",
     "CLIPWRIGHT_MAX_DURATION_S=0",
     "CLIPWRIGHT_PER_DAY_QUOTA=0",
+    "CLIPWRIGHT_MAX_DIM=0",
+    "CLIPWRIGHT_GUEST_PER_DAY_QUOTA=-1",   # 0 is the off switch; below it is a typo
     "CLIPWRIGHT_RETENTION_DAYS=0",
     "CLIPWRIGHT_RETENTION_DAYS=-inf",
 ])
@@ -680,6 +715,27 @@ def test_load_config_rejects_out_of_range_numbers(tmp_path, line) -> None:
     key = line.split("=", 1)[0]
     with pytest.raises(ConfigError, match=re.escape(key)):
         load_config(str(path))
+
+
+def test_load_config_group_ids_default_to_every_group(tmp_path) -> None:
+    """Unset, the bot works in any group it is added to; set, only in those (negative chat ids)."""
+    path = write_env(tmp_path, f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\n")
+    assert load_config(str(path)).group_ids == set()
+    path = write_env(tmp_path, f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\n"
+                               "CLIPWRIGHT_GROUP_IDS=-1001234567890, -100777,\n")
+    assert load_config(str(path)).group_ids == {-1001234567890, -100777}
+
+
+def test_load_config_guest_quota_zero_switches_groups_off(tmp_path) -> None:
+    """0 is meaningful for the guest quota alone: every other integer limit still stops at 1."""
+    path = write_env(tmp_path, f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\n")
+    assert load_config(str(path)).guest_per_day_quota == 10
+    path = write_env(tmp_path, f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\n"
+                               "CLIPWRIGHT_GUEST_PER_DAY_QUOTA=0\n")
+    assert load_config(str(path)).guest_per_day_quota == 0
+    path = write_env(tmp_path, f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=1\n"
+                               "CLIPWRIGHT_GUEST_PER_DAY_QUOTA=3\n")
+    assert load_config(str(path)).guest_per_day_quota == 3
 
 
 def test_load_config_accepts_small_positive_limits(tmp_path) -> None:
