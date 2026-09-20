@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+assets/photos/
+assets/Eaten_Ben_Chod.jpg

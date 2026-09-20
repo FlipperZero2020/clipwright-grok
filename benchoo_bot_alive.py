@@ -9,14 +9,17 @@ brightness flicker so the screen reads as live and glitching. No new pixels
 are drawn — this is pure photo animation of the source frame.
 """
 import math
+import os
 import subprocess
 
 from PIL import Image, ImageEnhance
+from style_common import scratch_dir
 
-SRC = "/home/tom/Downloads/Eaten_Ben_Chod.jpg"
-SCRATCH = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/1a36712f-4181-4a0c-8667-90a276abcb8c/scratchpad/"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+SRC = os.environ.get("CLIPWRIGHT_BENCHOO_SRC", os.path.join(ROOT, "assets", "Eaten_Ben_Chod.jpg"))
+SCRATCH = scratch_dir()
 OUT_RAW = SCRATCH + "benchoo_alive_raw.gif"
-OUT_FINAL = "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/benchoo_9000_bot_alive.gif"
+OUT_FINAL = os.path.join(ROOT, "benchoo_9000_bot_alive.gif")
 
 SIZE = 960          # large square canvas
 PAD = 56            # room for the weight-shift bob before we crop back
@@ -27,6 +30,16 @@ DELAY_MS = 38
 W = H = SIZE
 CW, CH = W + PAD * 2, H + PAD * 2
 
+
+def require_src(script):
+    """Fail before any frame is built if the composite photo isn't on disk."""
+    if not os.path.isfile(SRC):
+        raise SystemExit(
+            "%s: source photo not found at %s\n"
+            "Set CLIPWRIGHT_BENCHOO_SRC to the BENCHOO_9000_BOT composite photo "
+            "(it originally lived at %s) or put it at the default path above. "
+            "The photo is deliberately not part of the repo."
+            % (script, SRC, os.path.expanduser("~/Downloads/Eaten_Ben_Chod.jpg")))
 
 def smoothstep(a, b, x):
     t = max(0.0, min(1.0, (x - a) / (b - a)))
@@ -89,6 +102,7 @@ def flicker_screen(im, box, t):
 
 
 def main():
+    require_src('benchoo_bot_alive.py')
     src = Image.open(SRC).convert("RGB").resize((W, H), Image.LANCZOS)
     bg = tuple(int(c) for c in src.crop((4, 4, 36, 36)).resize((1, 1)).getpixel((0, 0)))
     xs, ys = grid_points(GX, GY, W, H)

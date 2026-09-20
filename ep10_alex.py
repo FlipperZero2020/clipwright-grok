@@ -7,9 +7,11 @@ bot, the $2,500/mo token bill). Nothing to exclude here: the exchange is the
 whole joke, no named third party appears, and none of it touches health,
 immigration, or misconduct.
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from tabloid_kit import Tabloid
+from style_common import scratch_dir
 
 t = Tabloid(
     masthead="THE MEMORY LEAK",
@@ -34,5 +36,5 @@ t = Tabloid(
     stop_press_lines=("STOP PRESS", "STILL HASN'T SAID GRAPHS"),
 )
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/94c4d75b-0862-434a-86bb-fbfb9d44adfb/scratchpad/"
-print(t.save(S + "alex_02_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/alex_02_memory_leak.gif"))
+S = scratch_dir()
+print(t.save(S + "alex_02_raw.gif", os.path.join(ROOT, "alex_02_memory_leak.gif")))

@@ -12,9 +12,11 @@ distinction from e.g. Guru's self-directed airport joke is that this one
 isn't hers; it's the group's joke about her national origin, which is a
 different and less defensible category.
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from tabloid_kit import Tabloid
+from style_common import scratch_dir
 
 t = Tabloid(
     masthead="THE SHOP FLOOR BULLETIN",
@@ -37,5 +39,5 @@ t = Tabloid(
     stop_press_lines=("STOP PRESS", "BEN STILL HASN'T COME BACK"),
 )
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(t.save(S + "maria_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/maria_01_shop_floor_bulletin.gif"))
+S = scratch_dir()
+print(t.save(S + "maria_raw.gif", os.path.join(ROOT, "maria_01_shop_floor_bulletin.gif")))

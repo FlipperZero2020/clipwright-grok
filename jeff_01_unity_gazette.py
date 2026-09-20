@@ -7,9 +7,11 @@ This is a hard exclude, not softened or alluded to. Also skipped: a vague
 "increased risk of your gf finding out" aside from another participant —
 unclear context, not worth the risk of implying something it may not mean.
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from tabloid_kit import Tabloid
+from style_common import scratch_dir
 
 t = Tabloid(
     masthead="THE UNITY GAZETTE",
@@ -32,5 +34,5 @@ t = Tabloid(
     stop_press_lines=("STOP PRESS", "STILL HASN'T BOUGHT THE ETF"),
 )
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(t.save(S + "jeff_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/jeff_01_unity_gazette.gif"))
+S = scratch_dir()
+print(t.save(S + "jeff_raw.gif", os.path.join(ROOT, "jeff_01_unity_gazette.gif")))

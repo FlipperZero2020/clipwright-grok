@@ -1,5 +1,5 @@
 {
-  "_comment": "Rotation state for the hourly GIF series. Each run picks the first pending subject, researches them in graphiti, builds a GIF, then moves them to done.",
+  "_comment": "Rotation state for the hourly GIF series. Each run picks the first pending subject, researches them in graphiti, builds a GIF, then moves them to done. `one_offs` lists the standalone gags at the repo root that are outside the rotation (file / style_base / topic) so tools/check_series.py can account for every root *.gif.",
   "done": [
     {
       "subject": "Justin",
@@ -119,9 +119,48 @@
       "style": "meme",
       "file": "alex_04_dad_house_blender.gif",
       "topic": "gave the ai his dad's house plans, got a full 3D Blender walkthrough back / first outing for the meme_kit style"
+    },
+    {
+      "subject": "Michael",
+      "group": null,
+      "style": "tabloid",
+      "file": "michael_01_whistleblower.gif",
+      "topic": "whistling-competition hobby, out-whistled an actual robin to qualify / lost the knock-out round to a mustache-twirling high-note specialist / training for 2030 since 2020, 'all gas, no brakes' / Teams-DM one-off, not benchod_tg/weir_tg"
     }
   ],
   "pending": [],
+  "one_offs": [
+    {
+      "file": "nabep_drill_baby_drill.gif",
+      "style_base": "ballad_kit (reused)",
+      "topic": "dark political satire on a pasted \"DRILL, BABY, DRILL!\" NABEP / U.S. Gov't Venezuela deal poster \u2014 ICE-supplied labor sold as 'two birds, one stone'; targets the policy/PR framing, no named individual or group"
+    },
+    {
+      "file": "stereotype_speedrun.gif",
+      "style_base": "meme_kit (reused)",
+      "topic": "every classic stock meme template meme_kit can find, rapid-fired one after another, each roasting itself for being a clich\u00e9 \u2014 no coworker, no real quotes, captions are original writing"
+    },
+    {
+      "file": "open_mic_office.gif",
+      "style_base": "standalone (own hand-drawn cartoon Reel, no kit)",
+      "topic": "a user-supplied 'below the line' statement about voice dictation and vibe coding, drawn as a deliberately terrible office cartoon cut with three Wikimedia Commons stock photos \u2014 'GUY' is an invented character, no real person"
+    },
+    {
+      "file": "benchoo_9000_animated.gif",
+      "style_base": "standalone (photo animation, no kit)",
+      "topic": "an earlier 480px / 48-frame animation of the pasted BENCHOO_9000_BOT composite photo; no script in the repo writes this file \u2014 benchoo_bot_alive.py's current output is benchoo_9000_bot_alive.gif"
+    },
+    {
+      "file": "benchoo_9000_bot_alive.gif",
+      "style_base": "standalone (photo animation, no kit)",
+      "topic": "the pasted BENCHOO_9000_BOT composite photo brought to life \u2014 mesh-warp breathing sway, slow weight-shift bob, and the 'Heartbeat.md Eaten' chest monitor flickering like a live, glitching screen; no new pixels drawn (benchoo_bot_alive.py)"
+    },
+    {
+      "file": "benchoo_grab_laser.gif",
+      "style_base": "standalone (photo animation, no kit)",
+      "topic": "the same BENCHOO_9000_BOT photo as a gag: the flexed fist stretches out and clamps near the coworker's hands, the multi-lens eye charges up and fires a beam at her face (she blinks), screen-shake and flash on impact, then springs back so the loop is seamless (benchoo_grab_laser.py)"
+    }
+  ],
   "styles": {
     "ballad": "ballad_kit.py \u2014 dark 640x640, 5 scenes: title/chat/document/dossier/counter",
     "tabloid": "tabloid_kit.py \u2014 600x780 newsprint front page that assembles, then STOP PRESS (generalized from tyler_01_enquirer.py; see alex_01_register.py for usage)",

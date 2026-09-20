@@ -3,8 +3,11 @@
 Different series, different style: newsprint portrait, not the dark ballad format.
 Every headline and pull-quote is verbatim Tyler, from weir_tg.
 """
-import math, random, subprocess
+import math, os, random, subprocess
 from PIL import Image, ImageDraw, ImageFont
+from style_common import scratch_dir
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
 
 W, H = 600, 780
 F = "/usr/share/fonts/truetype/dejavu/"
@@ -181,8 +184,8 @@ for i in range(9):                   # stop press slams in
     emit(page(6.3, (i + 1) / 9), 45)
 emit(page(6.3, 1.0), 3800)           # final hold
 
-raw = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/tyler_raw.gif"
-out = "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/tyler_01_quinlan_enquirer.gif"
+raw = scratch_dir() + "tyler_raw.gif"
+out = os.path.join(ROOT, "tyler_01_quinlan_enquirer.gif")
 frames[0].save(raw, save_all=True, append_images=frames[1:], duration=delays,
                loop=0, optimize=False, disposal=1)
 subprocess.run(["gifsicle", "-O2", "--careful", "--colors", "72", raw, "-o", out], check=True)

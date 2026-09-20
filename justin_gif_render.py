@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """The Ballad of @topo_chino — an animated GIF built from real benchod_tg facts."""
-import math
+import math, os, subprocess
 from PIL import Image, ImageDraw, ImageFont
+from style_common import scratch_dir
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
 
 W, H = 640, 640
 F = "/usr/share/fonts/truetype/dejavu/"
@@ -181,7 +184,9 @@ title(d, "1", 428, font(88, True), GOLD)
 title(d, "still emailing from @fluenceanalytics.com", 560, font(15), (96, 114, 130))
 emit(img, 2600)
 
-out = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/justin_raw.gif"
-frames[0].save(out, save_all=True, append_images=frames[1:], duration=delays,
+raw = scratch_dir() + "justin_raw.gif"
+out = os.path.join(ROOT, "justin_ballad_of_topo_chino.gif")
+frames[0].save(raw, save_all=True, append_images=frames[1:], duration=delays,
                loop=0, optimize=False, disposal=1)
-print("frames:", len(frames), "->", out)
+subprocess.run(["gifsicle", "-O2", "--careful", "--colors", "100", raw, "-o", out], check=True)
+print(out, len(frames), "frames")

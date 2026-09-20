@@ -1,0 +1,60 @@
+# caption-loop — trim, loop, and put an Impact-style caption on the clip.
+name        = "caption-loop"
+blurb       = "Trim a clip, loop it, slap a caption on."
+emoji       = "💬"
+pipeline    = "caption_loop"
+needs_input = true
+
+[[knob]]
+key     = "caption.text"
+label   = "Text"
+type    = "text"
+max     = 60
+default = ""
+
+[[knob]]
+key     = "caption.size"
+label   = "Size"
+type    = "step"
+min     = 24
+max     = 160
+step    = 8
+default = 64
+
+[[knob]]
+key     = "caption.color"
+label   = "Colour"
+type    = "enum"
+values  = ["#ffffff", "#ffdd00", "#ff4444", "#44ff88"]
+labels  = ["⬜ White", "🟨 Yellow", "🟥 Red", "🟩 Green"]
+default = "#ffffff"
+
+[[knob]]
+key     = "caption.pos"
+label   = "Position"
+type    = "enum"
+values  = ["top", "bottom"]
+labels  = ["⬆️ Top", "⬇️ Bottom"]
+default = "bottom"
+
+[[knob]]
+key     = "loop"
+label   = "Loop"
+type    = "enum"
+values  = ["seamless", "boomerang", "crossfade", "none"]
+labels  = ["🔁 Seamless", "🪃 Boomerang", "🌫 Crossfade", "⏹ None"]
+default = "seamless"
+
+[[knob]]
+key     = "fits"
+label   = "Fits"
+type    = "enum"
+values  = ["telegram", "discord", "slack"]
+labels  = ["✈️ Telegram", "🎮 Discord", "💼 Slack"]
+default = "telegram"
+
+[[knob]]
+key    = "trim"
+label  = "Trim"
+type   = "range"
+step_s = 0.1

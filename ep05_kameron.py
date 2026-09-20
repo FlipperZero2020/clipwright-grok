@@ -3,9 +3,11 @@
 Every quote verbatim. The whole episode turns on one double meaning: "ARGEN" is
 both his new work project AND his own codename for vaping in the server room.
 """
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def vape_pen(d, cx, cy, R, ang, color=GOLD):
@@ -68,5 +70,5 @@ b.dossier("SUBJECT DOSSIER", "Kameron Billingsley · Houston-area office", [
 b.counter("DISPOSABLES BOUGHT, LAST 3 WEEKS", "0",
           "argen is my friend now", vape_pen)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(b.save(S + "ep05_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/kameron_01_friendship_ended.gif"))
+S = scratch_dir()
+print(b.save(S + "ep05_raw.gif", os.path.join(ROOT, "kameron_01_friendship_ended.gif")))

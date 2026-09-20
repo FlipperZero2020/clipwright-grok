@@ -1,0 +1,54 @@
+# gifify — the default recipe: any clip becomes a looping GIF that fits its platform.
+name        = "gifify"
+blurb       = "Turn a clip into a looping GIF that fits where you're posting it."
+emoji       = "🎞️"
+pipeline    = "gifify"
+needs_input = true
+
+[[knob]]
+key     = "fps"
+label   = "FPS"
+type    = "step"
+min     = 8
+max     = 30
+step    = 2
+default = 15
+
+[[knob]]
+key     = "width"
+label   = "Width"
+type    = "step"
+min     = 240
+max     = 640
+step    = 40
+default = 480
+
+[[knob]]
+key     = "colors"
+label   = "Colours"
+type    = "enum"
+values  = [64, 128, 256]
+labels  = ["64 · tiny", "128 · balanced", "256 · full"]
+default = 256
+
+[[knob]]
+key     = "loop"
+label   = "Loop"
+type    = "enum"
+values  = ["seamless", "boomerang", "crossfade", "none"]
+labels  = ["🔁 Seamless", "🪃 Boomerang", "🌫 Crossfade", "⏹ None"]
+default = "seamless"
+
+[[knob]]
+key     = "fits"
+label   = "Fits"
+type    = "enum"
+values  = ["telegram", "discord", "slack"]
+labels  = ["✈️ Telegram", "🎮 Discord", "💼 Slack"]
+default = "telegram"
+
+[[knob]]
+key    = "trim"
+label  = "Trim"
+type   = "range"
+step_s = 0.1

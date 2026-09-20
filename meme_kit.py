@@ -9,15 +9,15 @@ Browse https://api.memegen.link/templates/ for template ids before writing
 an episode. See an existing epNN_*.py using kit_module "meme_kit" for usage.
 """
 import io
-import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
+
+from style_common import GifRenderer, center_text, ease, load_font, wrap as _wrap
 
 W = H = 640
-F = "/usr/share/fonts/truetype/dejavu/"
 BG  = (18, 18, 20)
 BAR = (198, 32, 38)
 TXT = (240, 240, 240)
@@ -27,28 +27,11 @@ API = "https://api.memegen.link/images"
 
 
 def font(n, b=False):
-    return ImageFont.truetype(F + ("DejaVuSans-Bold.ttf" if b else "DejaVuSans.ttf"), n)
-
-
-def ease(t):
-    return 1 - (1 - t) ** 3
+    return load_font(n, bold=b, family="sans")
 
 
 def _ctr(d, s, y, f, col=TXT, cx=W // 2):
-    d.text((cx - d.textlength(s, font=f) / 2, y), s, font=f, fill=col)
-
-
-def _wrap(d, text, f, maxw):
-    words, lines, cur = text.split(), [], ""
-    for w in words:
-        t = (cur + " " + w).strip()
-        if d.textlength(t, font=f) <= maxw:
-            cur = t
-        else:
-            lines.append(cur); cur = w
-    if cur:
-        lines.append(cur)
-    return lines
+    center_text(d, s, y, f, col, cx)
 
 
 def _encode(text):
@@ -79,16 +62,12 @@ def fetch(template, top, bottom=None):
     return Image.open(io.BytesIO(data)).convert("RGB")
 
 
-class MemeReel:
+class MemeReel(GifRenderer):
     def __init__(self, kicker, footer=""):
+        super().__init__()
         self.kicker, self.footer = kicker, footer
-        self.frames, self.delays = [], []
 
     # ── plumbing ─────────────────────────────────────────────────────────────
-    def _emit(self, img, ms):
-        self.frames.append(img.convert("P", palette=Image.ADAPTIVE, colors=128))
-        self.delays.append(ms)
-
     def _base(self):
         img = Image.new("RGB", (W, H), BG)
         d = ImageDraw.Draw(img)
@@ -117,7 +96,7 @@ class MemeReel:
                     _ctr(d, l, H - 26 - (len(lines) - i) * 20, font(16), DIM)
 
         for i in range(intro_frames):
-            img, d = self._base(); paint(d, img, ease(i / max(1, intro_frames - 1))); self._emit(img, 45)
+            img, d = self._base(); paint(d, img, i / max(1, intro_frames - 1)); self._emit(img, 45)
         img, d = self._base(); paint(d, img, 1, True); self._emit(img, hold)
 
     # ── stinger: closing beat, same job as ballad's counter / tabloid's STOP PRESS
@@ -130,13 +109,5 @@ class MemeReel:
                 _ctr(d, self.footer, H - 50, font(14), DIM)
 
         for i in range(12):
-            img, d = self._base(); paint(d, ease(i / 11)); self._emit(img, 45)
+            img, d = self._base(); paint(d, i / 11); self._emit(img, 45)
         img, d = self._base(); paint(d, 1); self._emit(img, hold)
-
-    # ── output ───────────────────────────────────────────────────────────────
-    def save(self, raw, final, colors=100):
-        self.frames[0].save(raw, save_all=True, append_images=self.frames[1:],
-                            duration=self.delays, loop=0, optimize=False, disposal=1)
-        subprocess.run(["gifsicle", "-O2", "--careful", "--colors", str(colors),
-                        raw, "-o", final], check=True)
-        return final

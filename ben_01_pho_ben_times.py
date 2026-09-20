@@ -8,9 +8,11 @@ crude literal meaning of "Ben Chod" itself — it's the group's own inside
 joke and the origin of the chat's name, but there is no need to spell out
 the slur to make the "the bot outlives him" joke land.
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from tabloid_kit import Tabloid
+from style_common import scratch_dir
 
 t = Tabloid(
     masthead="THE PHO BEN TIMES",
@@ -33,5 +35,5 @@ t = Tabloid(
     stop_press_lines=("STOP PRESS", "NEVER ACTUALLY LEFT"),
 )
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(t.save(S + "ben_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/ben_01_pho_ben_times.gif"))
+S = scratch_dir()
+print(t.save(S + "ben_raw.gif", os.path.join(ROOT, "ben_01_pho_ben_times.gif")))

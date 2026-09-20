@@ -14,9 +14,11 @@ owner's own outgoing message, not Alex's — left out rather than misattributed.
 Nothing to exclude otherwise: no confidential data, health, immigration, or
 misconduct angle here.
 """
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def gear_chip(d, cx, cy, R, ang, color=GOLD):
@@ -85,5 +87,5 @@ b.dossier("SUBJECT DOSSIER", "Alex · benchod_tg · engineer", [
 b.counter("AUGUST AI SPEND", "$8,000",
           "Kameron's read: “straight jarvis shit”", gear_chip)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/f54982ce-b35a-454f-8dd8-5ca438a79103/scratchpad/"
-print(b.save(S + "ep11_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/alex_03_model_at_capacity.gif"))
+S = scratch_dir()
+print(b.save(S + "ep11_raw.gif", os.path.join(ROOT, "alex_03_model_at_capacity.gif")))

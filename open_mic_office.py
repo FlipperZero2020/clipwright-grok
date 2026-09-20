@@ -7,17 +7,19 @@ real stock photos snapped in from Wikimedia Commons for the "match the
 cartoon" bit. No real person is depicted — "GUY" is a generic invented
 office character, not anyone from the group chats.
 
-Photo credits (Wikimedia Commons, downloaded to this session's scratchpad,
-not committed to the repo):
+Photo credits (Wikimedia Commons; fetched into assets/photos/ by
+tools/fetch_open_mic_photos.py, not committed to the repo — see PHOTO_SOURCES):
   - Call_Center_Agent.jpg — FiveOne51, CC BY-SA 3.0
   - Gulf Worldwide Sales & Marketing Team.jpg — MarkJaysonAranda, CC BY-SA 3.0
   - RustCodeOnScreen.jpg — Slashme, CC0 / public domain
 """
 import math
+import os
 import random
 import subprocess
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from style_common import scratch_dir
 
 W, H = 720, 500
 F = "/usr/share/fonts/truetype/dejavu/"
@@ -34,7 +36,30 @@ DESKTOP= (176, 128, 80)
 SCREEN = (140, 205, 255)
 SHIRT  = [(90, 130, 150), (150, 110, 140), (110, 140, 95), (150, 130, 80)]
 
-PHOTOS = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/c48d7999-3586-4ae7-926a-818b309a77d5/scratchpad/photos/"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+PHOTOS = os.environ.get("CLIPWRIGHT_PHOTOS", os.path.join(ROOT, "assets", "photos")) + "/"
+
+# local filename the reel opens -> (Wikimedia Commons "File:" name, author, licence).
+# tools/fetch_open_mic_photos.py downloads these into PHOTOS under the local names.
+PHOTO_SOURCES = {
+    "office_cubicles.jpg":   ("Gulf Worldwide Sales & Marketing Team.jpg", "MarkJaysonAranda", "CC BY-SA 3.0"),
+    "call_center_agent.jpg": ("Call_Center_Agent.jpg", "FiveOne51", "CC BY-SA 3.0"),
+    "rust_code_screen.jpg":  ("RustCodeOnScreen.jpg", "Slashme", "CC0 / public domain"),
+}
+
+
+def require_photos():
+    """Fail before drawing a single frame if any Commons photo is missing."""
+    missing = [name for name in PHOTO_SOURCES if not os.path.isfile(PHOTOS + name)]
+    if not missing:
+        return
+    lines = ["open_mic_office.py: missing source photo(s) in %s" % PHOTOS]
+    for name in missing:
+        commons, author, licence = PHOTO_SOURCES[name]
+        lines.append("  %s  <- Wikimedia Commons File:%s  (%s, %s)" % (name, commons, author, licence))
+    lines.append("Run tools/fetch_open_mic_photos.py to download them, or point "
+                 "CLIPWRIGHT_PHOTOS at a directory that already holds them.")
+    raise SystemExit("\n".join(lines))
 
 
 def font(n, b=False, mono=False):
@@ -435,6 +460,7 @@ class Reel:
 
 
 if __name__ == "__main__":
+    require_photos()
     r = Reel()
     r.title()
     r.office_establish()
@@ -446,5 +472,5 @@ if __name__ == "__main__":
     r.cutaway("rust_code_screen.jpg", "(his screen, probably)", rot=-3, w=300, h=280, cy=250)
     r.cry()
     r.stinger()
-    S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/c48d7999-3586-4ae7-926a-818b309a77d5/scratchpad/"
-    print(r.save(S + "open_mic_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/open_mic_office.gif"))
+    S = scratch_dir()
+    print(r.save(S + "open_mic_raw.gif", os.path.join(ROOT, "open_mic_office.gif")))

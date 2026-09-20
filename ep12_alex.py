@@ -11,9 +11,11 @@ stopper" bot) comes from Alex's existing graph entity, not this thread.
 Nothing else to exclude: no confidential data, health, immigration, or
 misconduct angle in the one quote actually used here.
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from meme_kit import MemeReel
+from style_common import scratch_dir
 
 r = MemeReel(kicker="benchod_tg · NO. 12", footer="Alex · benchod_tg · dad's house, now fully rendered")
 
@@ -28,5 +30,5 @@ r.card("success", "gave the ai his dad's house plans",
 
 r.stinger("STILL WAITING ON", "THE DOOM PORT")
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/f54982ce-b35a-454f-8dd8-5ca438a79103/scratchpad/"
-print(r.save(S + "ep12_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/alex_04_dad_house_blender.gif"))
+S = scratch_dir()
+print(r.save(S + "ep12_raw.gif", os.path.join(ROOT, "alex_04_dad_house_blender.gif")))

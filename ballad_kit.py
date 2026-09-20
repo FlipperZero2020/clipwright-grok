@@ -2,13 +2,14 @@
 """ballad_kit — the shared visual style for the @topo_chino GIF series.
 
 Five scenes, always in this order: title · chat · document · dossier · counter.
-An episode is just data + an emblem drawing function. See ep01/ep02.
+An episode is just data + an emblem drawing function. See justin_gif_render.py (the original) and ep06_aaron.py.
 """
-import math, subprocess
-from PIL import Image, ImageDraw, ImageFont
+import math
+from PIL import Image, ImageDraw
+
+from style_common import GifRenderer, center_text, ease, load_font, wrap
 
 W = H = 640
-F = "/usr/share/fonts/truetype/dejavu/"
 
 BG     = (23, 33, 43)
 PANEL  = (24, 37, 51)
@@ -24,43 +25,17 @@ INK2   = (110, 120, 132)
 
 
 def font(n, b=False, mono=False):
-    if mono:
-        return ImageFont.truetype(F + ("DejaVuSansMono-Bold.ttf" if b else "DejaVuSansMono.ttf"), n)
-    return ImageFont.truetype(F + ("DejaVuSans-Bold.ttf" if b else "DejaVuSans.ttf"), n)
+    return load_font(n, bold=b, family="mono" if mono else "sans")
 
 
-def ease(t):
-    return 1 - (1 - t) ** 3
-
-
-def wrap(d, text, f, maxw):
-    words, lines, cur = text.split(), [], ""
-    for w in words:
-        t = (cur + " " + w).strip()
-        if d.textlength(t, font=f) <= maxw:
-            cur = t
-        else:
-            lines.append(cur); cur = w
-    if cur:
-        lines.append(cur)
-    return lines
-
-
-class Ballad:
-    def __init__(self):
-        self.frames, self.delays = [], []
-
+class Ballad(GifRenderer):
     # ── plumbing ─────────────────────────────────────────────────────────────
     def _base(self):
         img = Image.new("RGB", (W, H), BG)
         return img, ImageDraw.Draw(img)
 
-    def _emit(self, img, ms):
-        self.frames.append(img.convert("P", palette=Image.ADAPTIVE, colors=128))
-        self.delays.append(ms)
-
     def _ctr(self, d, s, y, f, col=TXT):
-        d.text((W // 2 - d.textlength(s, font=f) / 2, y), s, font=f, fill=col)
+        center_text(d, s, y, f, col, W // 2)
 
     # ── scene 1 · title ──────────────────────────────────────────────────────
     def title(self, kicker, headline, tagline, footer, emblem):
@@ -178,11 +153,3 @@ class Ballad:
         for i in range(30):
             img, d = self._base(); paint(d, -i * 0.26); self._emit(img, 55)
         img, d = self._base(); paint(d, -30 * 0.26); self._emit(img, 2600)
-
-    # ── output ───────────────────────────────────────────────────────────────
-    def save(self, raw, final, colors=100):
-        self.frames[0].save(raw, save_all=True, append_images=self.frames[1:],
-                            duration=self.delays, loop=0, optimize=False, disposal=1)
-        subprocess.run(["gifsicle", "-O2", "--careful", "--colors", str(colors),
-                        raw, "-o", final], check=True)
-        return final

@@ -8,9 +8,11 @@ regardless of tone. Also declines to name his daughter, even though she is
 named in the graph — extending the same discretion used for other members'
 minor children throughout this series.
 """
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def factory_stacks(d, cx, cy, R, ang, color=GOLD):
@@ -75,5 +77,5 @@ b.dossier("SUBJECT DOSSIER", "Arun · Oxychem · Pasadena, TX", [
 b.counter("CHEMICAL PLANTS VISIBLE ON COMMUTE", "6-7",
           "still doesn't miss the snow", factory_stacks)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(b.save(S + "ep08_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/arun_01_at_least_6_7.gif"))
+S = scratch_dir()
+print(b.save(S + "ep08_raw.gif", os.path.join(ROOT, "arun_01_at_least_6_7.gif")))

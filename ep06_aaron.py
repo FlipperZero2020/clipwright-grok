@@ -7,9 +7,11 @@ himself) — and with it, the "skis in Japan" detail, since in the graph the two
 are inseparable (same source quote). Also excludes the Suncor/Alberta-company
 contracting detail — not clearly wrongdoing, but not clearly not, either.
 """
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def circuit_heart(d, cx, cy, R, ang, color=GOLD):
@@ -76,5 +78,5 @@ b.dossier("SUBJECT DOSSIER", "Aaron Bidart · Weir / Mechademy · San Francisco"
 b.counter("MONTHLY AI SPEND", "$200",
           "clients avoid Anthropic's servers. he doesn't.", circuit_heart)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(b.save(S + "ep06_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/aaron_01_the_humidity.gif"))
+S = scratch_dir()
+print(b.save(S + "ep06_raw.gif", os.path.join(ROOT, "aaron_01_the_humidity.gif")))

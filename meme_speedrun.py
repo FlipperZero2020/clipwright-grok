@@ -14,9 +14,11 @@ fits meme_kit's card(template, top, bottom) two-slot signature cleanly —
 3-line templates like Distracted Boyfriend or Epic Handshake are skipped
 rather than rendered with a missing third line.
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from meme_kit import MemeReel
+from style_common import scratch_dir
 
 # (template id, top, bottom, cap quip) — all lines<=2 templates per api.memegen.link/templates
 CARDS = [
@@ -65,5 +67,5 @@ for i, (template, top, bottom, quip) in enumerate(CARDS, 1):
 
 r.stinger("CLICHES DEPLOYED", str(n), hold=3000)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/e3426d34-9bc4-4901-8a1a-c4d77e5b7f97/scratchpad/"
-print(r.save(S + "speedrun_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/stereotype_speedrun.gif", colors=64))
+S = scratch_dir()
+print(r.save(S + "speedrun_raw.gif", os.path.join(ROOT, "stereotype_speedrun.gif"), colors=64))

@@ -4,9 +4,11 @@ Deliberately excludes: the ayahuasca retreat invite (drug/health), Devin's
 suggestion that Alex's bot swarm run fraud tasks (misconduct, and arguably
 not even Alex's own act), and the $TRUMP meme coin (unrelated political noise).
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from tabloid_kit import Tabloid
+from style_common import scratch_dir
 
 t = Tabloid(
     masthead="THE RAYMOND REGISTER",
@@ -29,5 +31,5 @@ t = Tabloid(
     stop_press_lines=("STOP PRESS", "SKATES: STILL ZERO"),
 )
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(t.save(S + "alex_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/alex_01_raymond_register.gif"))
+S = scratch_dir()
+print(t.save(S + "alex_raw.gif", os.path.join(ROOT, "alex_01_raymond_register.gif")))

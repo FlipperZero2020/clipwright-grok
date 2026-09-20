@@ -4,9 +4,11 @@ Every quote verbatim. Deliberately excludes: WiFi password cracking, the Amazon
 review/refund scheme, and the sushi-restaurant stamp-card exploit — real
 misconduct against real targets, not the harmless self-own the series is for.
 """
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def suitcase(d, cx, cy, R, ang, color=GOLD):
@@ -74,5 +76,5 @@ b.dossier("SUBJECT DOSSIER", "Devin · from The Peg, currently Houston Energy Co
 
 b.counter("CLAIMS DENIED", "2", "everytime i go back it is like i never left", suitcase)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(b.save(S + "ep03_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/devin_01_always_leaves_again.gif"))
+S = scratch_dir()
+print(b.save(S + "ep03_raw.gif", os.path.join(ROOT, "devin_01_always_leaves_again.gif")))

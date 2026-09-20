@@ -5,9 +5,11 @@ wages (political-opinion territory, not the harmless self-own the series is
 for), and anything about Devin's own scam-adjacent behavior surfaced in the
 same search results — not Joseph's, not this episode's business.
 """
-import sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from tabloid_kit import Tabloid
+from style_common import scratch_dir
 
 t = Tabloid(
     masthead="THE JOSEPH JOURNAL",
@@ -30,5 +32,5 @@ t = Tabloid(
     stop_press_lines=("STOP PRESS", "ACED IT.  WASN'T EVEN LOOKING."),
 )
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(t.save(S + "joseph_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/joseph_01_the_journal.gif"))
+S = scratch_dir()
+print(t.save(S + "joseph_raw.gif", os.path.join(ROOT, "joseph_01_the_journal.gif")))

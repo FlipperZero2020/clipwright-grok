@@ -1,0 +1,38 @@
+# boomerang — play the trimmed clip forward, then backward, forever.
+name        = "boomerang"
+blurb       = "Forward, then backward, forever."
+emoji       = "🪃"
+pipeline    = "boomerang"
+needs_input = true
+
+[[knob]]
+key     = "fps"
+label   = "FPS"
+type    = "step"
+min     = 8
+max     = 30
+step    = 2
+default = 15
+
+[[knob]]
+key     = "width"
+label   = "Width"
+type    = "step"
+min     = 240
+max     = 640
+step    = 40
+default = 480
+
+[[knob]]
+key     = "fits"
+label   = "Fits"
+type    = "enum"
+values  = ["telegram", "discord", "slack"]
+labels  = ["✈️ Telegram", "🎮 Discord", "💼 Slack"]
+default = "telegram"
+
+[[knob]]
+key    = "trim"
+label  = "Trim"
+type   = "range"
+step_s = 0.1

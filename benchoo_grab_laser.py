@@ -21,14 +21,17 @@ v2 fixes vs the first pass:
     once early and once right as the beam lands.
 """
 import math
+import os
 import subprocess
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+from style_common import scratch_dir
 
-SRC = "/home/tom/Downloads/Eaten_Ben_Chod.jpg"
-SCRATCH = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/20734011-1b19-41af-96f4-0152cb1e6506/scratchpad/"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+SRC = os.environ.get("CLIPWRIGHT_BENCHOO_SRC", os.path.join(ROOT, "assets", "Eaten_Ben_Chod.jpg"))
+SCRATCH = scratch_dir()
 OUT_RAW = SCRATCH + "benchoo_grab_laser_raw.gif"
-OUT_FINAL = "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/benchoo_grab_laser.gif"
+OUT_FINAL = os.path.join(ROOT, "benchoo_grab_laser.gif")
 
 SIZE = 800
 PAD = 44
@@ -54,6 +57,16 @@ FIST_BOX = (round(FIST[0] - 100 * SC), round(FIST[1] - 65 * SC),
 _fbw, _fbh = FIST_BOX[2] - FIST_BOX[0], FIST_BOX[3] - FIST_BOX[1]
 HEAL_SRC_BOX = (FIST_BOX[0], FIST_BOX[1] - _fbh, FIST_BOX[2], FIST_BOX[1])
 
+
+def require_src(script):
+    """Fail before any frame is built if the composite photo isn't on disk."""
+    if not os.path.isfile(SRC):
+        raise SystemExit(
+            "%s: source photo not found at %s\n"
+            "Set CLIPWRIGHT_BENCHOO_SRC to the BENCHOO_9000_BOT composite photo "
+            "(it originally lived at %s) or put it at the default path above. "
+            "The photo is deliberately not part of the repo."
+            % (script, SRC, os.path.expanduser("~/Downloads/Eaten_Ben_Chod.jpg")))
 
 def smoothstep(a, b, x):
     if a == b:
@@ -263,6 +276,7 @@ def blink_layer(skin_color, t):
 
 
 def main():
+    require_src('benchoo_grab_laser.py')
     src = Image.open(SRC).convert("RGB").resize((W, H), Image.LANCZOS)
     bg = tuple(int(c) for c in src.crop((4, 4, 36, 36)).resize((1, 1)).getpixel((0, 0)))
     xs, ys = grid_points(GX, GY, W, H)

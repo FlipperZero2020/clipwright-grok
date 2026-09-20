@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """No. 2 — EXCEPT AN ACOMP. Every quote verbatim from benchod_tg."""
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def acomp(d, cx, cy, R, ang, color=GOLD):
@@ -76,5 +78,5 @@ b.dossier("ACOMP · FIELD REPORT", "Justin · Stafford, TX · the man you ask ab
 b.counter("TRIPS TO SINGAPORE", "0",
           "the ACOMP vaguely resembles a plant", acomp)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(b.save(S + "ep02_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/justin_02_except_an_acomp.gif"))
+S = scratch_dir()
+print(b.save(S + "ep02_raw.gif", os.path.join(ROOT, "justin_02_except_an_acomp.gif")))

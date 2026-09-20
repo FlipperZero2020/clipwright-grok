@@ -8,9 +8,11 @@ policy/PR framing, not any named individual or ethnic/national group.
 Reuses ballad_kit's 5-scene structure for visual consistency with the
 project's house style.
 """
-import sys, math
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 W = H = 640
 
@@ -89,5 +91,5 @@ b.counter(
     emblem=pumpjack,
 )
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/16291870-5951-4c4b-b20c-a3abb5ae73d1/scratchpad/"
-print(b.save(S + "nabep_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/nabep_drill_baby_drill.gif"))
+S = scratch_dir()
+print(b.save(S + "nabep_raw.gif", os.path.join(ROOT, "nabep_drill_baby_drill.gif")))

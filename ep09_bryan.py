@@ -7,9 +7,11 @@ noted and set aside, not used. The great-grandparents'-diary detail is kept
 warm rather than played for a laugh — it's a genuinely nice thing about him,
 not a self-own.
 """
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def camper(d, cx, cy, R, ang, color=GOLD):
@@ -83,5 +85,5 @@ b.dossier("SUBJECT DOSSIER", "Bryan Powell · “Big_D_B” · Syncrude", [
 b.counter("MESSAGES MISSED BEFORE HE NOTICED", "~3,000",
           "the chat was quiet. now it isn't.", camper)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(b.save(S + "ep09_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/bryan_01_8_years.gif"))
+S = scratch_dir()
+print(b.save(S + "ep09_raw.gif", os.path.join(ROOT, "bryan_01_8_years.gif")))

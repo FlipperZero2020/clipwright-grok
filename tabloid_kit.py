@@ -3,11 +3,12 @@
 Generalized from tyler_01_enquirer.py. One page that assembles itself,
 then a STOP PRESS band slams in. See alex_01_register.py for usage.
 """
-import math, random, subprocess
-from PIL import Image, ImageDraw, ImageFont
+import math, random, warnings
+from PIL import Image, ImageDraw
+
+from style_common import GifRenderer, center_text, ease, load_font, wrap as _common_wrap
 
 W, H = 600, 780
-F = "/usr/share/fonts/truetype/dejavu/"
 PAPER = (245, 241, 232)
 INK   = (26, 24, 22)
 RED   = (198, 32, 38)
@@ -16,15 +17,11 @@ EDGE  = (206, 200, 188)
 
 
 def fs(n, b=True):
-    return ImageFont.truetype(F + ("DejaVuSerif-Bold.ttf" if b else "DejaVuSerif.ttf"), n)
+    return load_font(n, bold=b, family="serif")
 
 
 def fa(n, b=True):
-    return ImageFont.truetype(F + ("DejaVuSans-Bold.ttf" if b else "DejaVuSans.ttf"), n)
-
-
-def ease(t):
-    return 1 - (1 - t) ** 3
+    return load_font(n, bold=b, family="sans")
 
 
 def clamp(t):
@@ -49,20 +46,20 @@ probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
 
 def _ctr(d, s, y, f, col=INK, cx=W // 2):
-    d.text((cx - probe.textlength(s, font=f) / 2, y), s, font=f, fill=col)
+    center_text(d, s, y, f, col, cx)
 
 
 def _wrap(text, f, maxw):
-    words, lines, cur = text.split(), [], ""
-    for w in words:
-        t = (cur + " " + w).strip()
-        if probe.textlength(t, font=f) <= maxw:
-            cur = t
-        else:
-            lines.append(cur); cur = w
-    if cur:
-        lines.append(cur)
-    return lines
+    return _common_wrap(probe, text, f, maxw)
+
+
+def _warn_overflow(what, lines, cap):
+    """Text that wraps past what its slot can show is dropped (strips) or drawn
+    out of view (columns' stagger cap, the footer band). Say so loudly, naming
+    the slot and the words the reader will never see, instead of failing quietly."""
+    if len(lines) > cap:
+        warnings.warn("tabloid %s wraps to %d lines but only %d fit; not shown: %r"
+                      % (what, len(lines), cap, " ".join(lines[cap:])), stacklevel=2)
 
 
 def _slam(img, text, size, color, cx, cy, prog):
@@ -76,7 +73,7 @@ def _slam(img, text, size, color, cx, cy, prog):
 
 def _starburst(img, lines, cx, cy, r, prog):
     p = ease(clamp(prog))
-    if p <= 0:
+    if p <= 0 or not lines:
         return
     lay = Image.new("RGBA", (r * 4, r * 4), (0, 0, 0, 0))
     d = ImageDraw.Draw(lay)
@@ -99,19 +96,42 @@ def _starburst(img, lines, cx, cy, r, prog):
     img.paste(lay, (int(cx - lay.width / 2), int(cy - lay.height / 2)), lay)
 
 
-class Tabloid:
+class Tabloid(GifRenderer):
+    emit_colors = 64
+
     def __init__(self, masthead, dateline, kicker, headline_lines, deck, col1, col2,
                  starburst_lines, starburst_pos, strips, also_inside, stop_press_lines):
+        super().__init__()
         self.masthead, self.dateline, self.kicker = masthead, dateline, kicker
         self.headline_lines, self.deck = headline_lines, deck
         self.col1, self.col2 = col1, col2
         self.starburst_lines, self.starburst_pos = starburst_lines, starburst_pos
         self.strips, self.also_inside, self.stop_press_lines = strips, also_inside, stop_press_lines
-        self.frames, self.delays = [], []
 
-    def _emit(self, img, ms):
-        self.frames.append(img.convert("P", palette=Image.ADAPTIVE, colors=64))
-        self.delays.append(ms)
+    def _timeline(self):
+        """The three beats every later element hangs off, in seconds: deck and
+        columns (dbase), starburst and strips (sbase), the ALSO INSIDE band
+        (also_base). `_page` paints from these and `_page_end` stops the frame
+        loop from them, so retuning one can't leave the other behind."""
+        dbase = 2.9 + max(0, len(self.headline_lines) - 3) * .45
+        sbase = dbase + 1.1
+        also_base = sbase + .4 + len(self.strips) * .35 + .5
+        return dbase, sbase, also_base
+
+    def _page_end(self):
+        return self._timeline()[2] + .6
+
+    def _strip_gap(self, shift):
+        """Vertical pitch of the quote strips: 58px, squeezed to no less than 40px
+        so a tall deck still fits them above the ALSO INSIDE band. Warns when even
+        40px isn't enough and the last strip would run under the footer."""
+        n = len(self.strips)
+        top, limit = 492 + shift, H - 92 - 12  # 12px breathing room above the footer
+        gap = min(58, max(40, (limit - top - 46) / (n - 1))) if n > 1 else 58
+        if n and top + (n - 1) * gap + 46 > limit:
+            warnings.warn("tabloid strips: %d strips need %dpx but only %dpx fit above the footer"
+                          % (n, (n - 1) * gap + 46, limit - top), stacklevel=2)
+        return gap
 
     def _page(self, t, stop=0.0):
         img = PAPER_BG.copy(); d = ImageDraw.Draw(img)
@@ -128,7 +148,7 @@ class Tabloid:
                 _slam(img, line, 46, INK, W // 2, 175 + i * 50, (t - (1.2 + i * .45)) / .45)
         d = ImageDraw.Draw(img)
 
-        dbase = 2.9 + max(0, len(self.headline_lines) - 3) * .45
+        dbase, sbase, also_base = self._timeline()
         deck_lines = _wrap(self.deck, fs(19, False), W - 92)
         deck_h = len(deck_lines) * 26
         if t > dbase:
@@ -136,25 +156,29 @@ class Tabloid:
                 _ctr(d, l, 300 + j * 26, fs(19, False), GREY)
             d.line([46, 306 + deck_h, W - 46, 306 + deck_h], fill=INK, width=2)
         body_y = 318 + deck_h
+        shift = deck_h - 26  # extra vertical room used by a multi-line deck
         if t > dbase + .4:
             n = int(clamp((t - (dbase + .4)) / .8) * 12)
             for ci, col in enumerate((self.col1, self.col2)):
                 x = 46 + ci * 206
-                for j, l in enumerate(_wrap(col, fa(11, False), 196)):
+                lines = _wrap(col, fa(11, False), 196)
+                cap = 12 - ci * 6  # the stagger reveal's cap: col1 shows 12 rows at most, col2 6
+                if self.strips:
+                    # The first quote strip is painted (opaque) over the columns at
+                    # 492 + shift, i.e. 148px below body_y whatever the deck height,
+                    # so only the 9 rows above it are ever visible.
+                    cap = min(cap, (492 + shift - body_y) // 16)
+                _warn_overflow("col%d" % (ci + 1), lines, cap)
+                for j, l in enumerate(lines):
                     if j + ci * 6 < n:
                         d.text((x, body_y + j * 16), l, font=fa(11, False), fill=(58, 54, 50))
 
-        shift = deck_h - 26  # extra vertical room used by a multi-line deck
-        sbase = dbase + 1.1
         if t > sbase:
             cx, cy = self.starburst_pos
             _starburst(img, self.starburst_lines, cx, cy + shift, 56, (t - sbase) / .6)
             d = ImageDraw.Draw(img)
 
-        n_strips = len(self.strips)
-        footer_top = H - 92
-        available = footer_top - (492 + shift) - 46 - 12  # 12px breathing room above the footer
-        gap = min(58, max(40, available / max(1, n_strips - 1))) if n_strips > 1 else 58
+        gap = self._strip_gap(shift)
         for i, (tag, quote) in enumerate(self.strips):
             base = sbase + .4 + i * .35
             if t > base:
@@ -166,14 +190,17 @@ class Tabloid:
                 d.rectangle([x0, y, x0 + tagw, y + 46], fill=RED)
                 d.text((x0 + 11, y + 16), tag, font=tagf, fill=(255, 255, 255))
                 d.rectangle([x0 + tagw, y, x0 + 508, y + 46], fill=(236, 231, 220), outline=EDGE)
-                lines = _wrap(quote, fs(13, False), 500 - tagw - 24)[:2]
+                lines = _wrap(quote, fs(13, False), 500 - tagw - 24)
+                _warn_overflow("strip %r" % tag, lines, 2)
+                lines = lines[:2]
                 for j, l in enumerate(lines):
                     d.text((x0 + tagw + 14, y + (14 if len(lines) == 1 else 6) + j * 18), l, font=fs(13, False), fill=INK)
 
-        also_base = sbase + .4 + len(self.strips) * .35 + .5
         if t > also_base:
             d.rectangle([30, H - 92, W - 30, H - 46], fill=INK)
-            for j, l in enumerate(_wrap(self.also_inside, fa(11), 500)):
+            also_lines = _wrap(self.also_inside, fa(11), 500)
+            _warn_overflow("also_inside", also_lines, 2)
+            for j, l in enumerate(also_lines):
                 _ctr(d, l, H - 84 + j * 17, fa(11), (245, 241, 232))
 
         if stop > 0:
@@ -190,7 +217,6 @@ class Tabloid:
             band = band.rotate(9, resample=Image.BICUBIC, expand=True)
             yy = int(-200 + (H // 2 + 200) * p)
             img.paste(band, (int(W / 2 - band.width / 2), yy - band.height // 2), band)
-        self._t_end = also_base + .6
         return img
 
     def render(self):
@@ -203,16 +229,6 @@ class Tabloid:
             self._emit(self._page(end, (i + 1) / 9), 45)
         self._emit(self._page(end, 1.0), 3800)
 
-    def _page_end(self):
-        dbase = 2.9 + max(0, len(self.headline_lines) - 3) * .45
-        sbase = dbase + 1.1
-        also_base = sbase + .4 + len(self.strips) * .35 + .5
-        return also_base + .6
-
     def save(self, raw, final, colors=72):
         self.render()
-        self.frames[0].save(raw, save_all=True, append_images=self.frames[1:],
-                            duration=self.delays, loop=0, optimize=False, disposal=1)
-        subprocess.run(["gifsicle", "-O2", "--careful", "--colors", str(colors),
-                        raw, "-o", final], check=True)
-        return final
+        return super().save(raw, final, colors)

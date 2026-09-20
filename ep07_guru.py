@@ -8,9 +8,11 @@ among friends (sanctions-evasion-adjacent, real legal risk, not a self-own);
 his opinion on US/Canada immigration trends (political-opinion territory);
 and his friends' account of the Iran conflict (war-adjacent, not comedic).
 """
-import math, sys
-sys.path.insert(0, "/home/tom/Documents/claude/CLIPWRIGHT_PLAN")
+import math, os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
 from ballad_kit import Ballad, GOLD
+from style_common import scratch_dir
 
 
 def lone_globe(d, cx, cy, R, ang, color=GOLD):
@@ -75,5 +77,5 @@ b.dossier("SUBJECT DOSSIER", "Guru · India · one of three founding members", [
 b.counter("DAYS TELEGRAM WAS DOWN", "7",
           "still just him, still the only timezone", lone_globe)
 
-S = "/tmp/claude-1000/-home-tom-Documents-claude-CLIPWRIGHT-PLAN/3b825699-41ec-46e0-9dd6-60fabb208cc9/scratchpad/"
-print(b.save(S + "ep07_raw.gif", "/home/tom/Documents/claude/CLIPWRIGHT_PLAN/guru_01_just_me_i_think.gif"))
+S = scratch_dir()
+print(b.save(S + "ep07_raw.gif", os.path.join(ROOT, "guru_01_just_me_i_think.gif")))

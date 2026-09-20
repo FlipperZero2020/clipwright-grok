@@ -136,8 +136,10 @@ A few things worth knowing that aren't obvious from reading one example:
   that's what made one past episode's "still 'mostly' a Mac guy" footer line
   land as a callback instead of filler.
 - Keep quote strips short — `tabloid_kit.py`'s layout wraps to two lines and
-  silently drops the overflow, so trim a long verbatim quote at a natural
-  clause boundary rather than letting the renderer cut it wherever.
+  drops the overflow (it warns at render time, naming the strip and the
+  words it dropped — treat that warning as a bug in your script, not noise),
+  so trim a long verbatim quote at a natural clause boundary rather than
+  letting the renderer cut it wherever.
 - If a kicker or dateline includes episode numbering (some past episodes do,
   e.g. ballad's `kicker="weir_tg · NO. 4"`), use `plan_episode.py`'s
   `global_episode_number`. Past episodes used at least three different
@@ -160,12 +162,17 @@ output.
 
 At the bottom of the script, call `.save(raw_path, final_path)` — `raw_path`
 is a throwaway intermediate frame dump, `final_path` is the real output.
-Point `raw_path` at *this session's own* scratchpad directory (check your
-system prompt for the current path — don't reuse a path from an old episode
-script, those are stale sessions' scratchpad dirs and won't exist anymore).
-Point `final_path` at `<project_root>/<gif_prefix><slug>.gif`, using the
-`gif_prefix` from `plan_episode.py` plus a slug that echoes the masthead you
-chose (e.g. prefix `alex_03_` + masthead "THE MEMORY LEAK" → `alex_03_memory_leak.gif`).
+Build `raw_path` from `style_common.scratch_dir()` the way every existing
+script does (`S = scratch_dir()` then `S + "<prefix>raw.gif"`) — a private
+per-run temp dir that is removed when the script exits, so nothing to clean
+up and nothing tied to a session. Never point it at a session scratchpad
+path: those die with the session, and a script that can't be re-run later
+is worthless here. Point `final_path` at
+`os.path.join(ROOT, "<gif_prefix><slug>.gif")` with
+`ROOT = os.path.dirname(os.path.abspath(__file__))` (again, copy an
+existing script's header — no absolute paths), using the `gif_prefix` from
+`plan_episode.py` plus a slug that echoes the masthead you chose (e.g. prefix
+`alex_03_` + masthead "THE MEMORY LEAK" → `alex_03_memory_leak.gif`).
 
 Run the script with `python3`. If it errors, fix the script and rerun — don't
 hand-edit the gif. Once it succeeds:
@@ -175,6 +182,14 @@ hand-edit the gif. Once it succeeds:
    into a new `done` entry; ad hoc mode just appends the new `done` entry.
    Match the existing entry shape exactly: `subject`, `group`, `style`,
    `file`, `topic` (a short, punchy description of what the episode's about
-   — see existing entries for the tone).
+   — see existing entries for the tone). Then regenerate the index with
+   `python3 tools/gen_gif_index.py` — GIF_INDEX.md is derived from the
+   ledger, never hand-edited.
 3. Tell the user what you made in a sentence or two — subject, angle, style
    — the way you'd caption it if you were the one posting it.
+4. Last, run `python3 tools/check_series.py` from the project root. It exits
+   non-zero and prints every problem if the new gif isn't on disk, a root
+   gif isn't in the ledger, the style isn't a known kit, the subject is in
+   both `pending` and `done`, or the personal episode number in the filename
+   isn't contiguous with the subject's earlier ones. Fix what it prints and
+   rerun until it's clean — that one line is the sign-off for the episode.
