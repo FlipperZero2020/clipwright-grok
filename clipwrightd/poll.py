@@ -8,41 +8,34 @@ at most the one in flight), and dispatches each update to one handler. The
 engine is reached only through ``cook_fn`` / ``probe_fn``, both injectable
 so tests run with fakes and never touch ffmpeg or a socket.
 
-Flow, per the plan: a video arrives → size gate (no download past the cap)
-→ queue and disk-budget gates → *on the render worker*: download to
-``<home>/uploads/<user_id>/<token>.<ext>`` → ffprobe gate (duration,
-resolution) → a ``gifify`` session → a proxy MP4 sent with the knob
-keyboard. The poll thread never waits on a download or a probe, and the
-user's one queue slot is taken for the whole ingest, so a second upload
-from the same person is refused before a byte of it is fetched. Every
-button press edits that one message in place; the top row
-switches recipes. Export cooks the real GIF, sends it as a document with
-its ``.recipe.toml`` sidecar, and ledgers the sent ``file_unique_id`` so
-``/remix`` can reopen it later — for the user who exported it (or the
-owner): the recipe names that user's private upload. In a DM anyone not on
-the allowlist gets silence (logged once).
+Flow, per the plan: a photo, video, or ``/gif`` intention arrives → size
+gate → queue and disk-budget gates → *on the render worker*: obtain a
+**seed** (download the replied media, fetch a Commons still for text, or
+generate a local typecard) → ffprobe gate → a recipe session → a proxy
+MP4 sent with the knob keyboard. The poll thread never waits on a
+download, a probe or a web fetch, and the user's one queue slot is taken
+for the whole ingest. Every button press edits that one message in place;
+the top row switches recipes. Export cooks the real GIF, sends it as a
+document with its ``.recipe.toml`` sidecar, and ledgers the sent
+``file_unique_id`` so ``/remix`` can reopen it later — for the user who
+exported it (or the owner): the recipe names that user's private upload.
+In a DM anyone not on the allowlist gets silence (logged once).
 
-Groups are served too, on a shorter leash. A group is a room, not an inbox:
-only explicit commands are acted on, and ``/gif`` in reply to a video is
-the way in — bare videos, chatter, stickers and joins are ignored without a
-word (other bots own the commands we do not know, unless one is addressed
-``@us``). Whoever is on the allowlist is served as in a DM; every other
-member is a *guest*, charged ``guest_per_day_quota`` for each render they
-trigger (preview, knob, export) and refused before a byte is downloaded
-once it is spent, and hears each hint or refusal at most once a minute (a
-hint costs them nothing, so a loop of ``/gif`` would otherwise spend the
-group's send allowance for everyone). Everything the bot sends in a group
-is a reply — to the ``/gif`` that opened the session (kept as
-``origin_message_id``) or to the message that asked — which also lands it
-in the right forum topic, and is still sent once that message has been
-deleted. Buttons and text prompts belong to the user who opened the
-session: another member's press is a toast, and only the owner's reply to
-the prompt itself is an answer (with privacy mode off the bot hears every
-word in the room). Senders that are not one person — anonymous admins,
-members posting as a channel, Telegram's own service accounts — share one
-id and are not served: ``/gif`` from them gets ``ANON_HINT``, the rest is
-dropped. ``CLIPWRIGHT_GROUP_IDS``, when set, names the only groups the bot
-works in; unset, any group it is added to.
+Groups are served too. A group is a room, not an inbox: only explicit
+commands are acted on, and ``/gif`` is the way in — reply to a photo,
+video or sentence, or ``/gif <words>``, or a bare ``/gif`` for a tiny
+self-aware typecard. Bare videos, chatter, stickers and joins are ignored
+without a word (other bots own the commands we do not know, unless one is
+addressed ``@us``). Everyone in a group the bot is in is trusted (the
+owner put it there on purpose); the allowlist is a DM gate, not a room
+gate. Everything the bot sends in a group is a reply — to the ``/gif``
+that opened the session (kept as ``origin_message_id``) or to the message
+that asked. Buttons and text prompts belong to the user who opened the
+session. Senders that are not one person — anonymous admins, members
+posting as a channel, Telegram's own service accounts — share one id and
+are not served: ``/gif`` from them gets ``ANON_HINT``, the rest is
+dropped. ``CLIPWRIGHT_GROUP_IDS``, when set, names the only groups the
+bot works in; unset, any group it is added to.
 
 Three rules keep what the user sees true:
 
@@ -86,9 +79,10 @@ from collections.abc import Callable
 from clipwright import ffmpeg, recipe
 from clipwright.cook import cli_command, cook
 from clipwright.pipelines import CookResult
-from clipwright.pipelines.common import SEGMENT_CAP_S
+from clipwright.pipelines.common import SEGMENT_CAP_S, STILL_HOLD_S
 from clipwrightd import config as config_mod
 from clipwrightd.api import BotAPI, BotAPIError
+from clipwrightd.fetch import FetchError, fetch_image
 from clipwrightd.keyboards import Callback, build_keyboard, decode_cb
 from clipwrightd.queue import RenderQueue
 from clipwrightd.session import LedgerEntry, Session, Store
@@ -96,6 +90,8 @@ from clipwrightd.session import LedgerEntry, Session, Store
 log = logging.getLogger("clipwrightd.poll")
 
 DEFAULT_RECIPE = "gifify"
+PHOTO_RECIPE = "ken-burns"
+TEXT_RECIPE = "typecard"
 POLL_TIMEOUT_S = 50
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 60.0
@@ -113,28 +109,43 @@ QUEUE_FULL = "The queue is full right now — try again in a minute."
 STALE_BUTTON = "That button is stale."
 CLIP_END = "That's the end of the clip."
 SHUT_DOWN_MID_RENDER = "I was shut down mid-render — send that again in a minute."
-GIF_HINT = "Reply /gif to a video and I'll GIF it."
 GROUP_OFF = "Group rendering is off in this chat."
-GROUP_START = ("Reply /gif to a video in this chat and I'll turn it into a GIF you can tune "
-               "with buttons. /help for details.")
+GROUP_START = ("Reply /gif to a photo, a video or a sentence in this chat — or /gif "
+               "some words — and I'll turn it into a GIF you can tune with buttons. "
+               "Bare /gif if you brought nothing. /help for details.")
 ANON_HINT = "I can't tell anonymous admins or channels apart — send /gif as yourself."
 NAG_COOLDOWN_S = 60.0        # a guest's hints and refusals in a group: one of each per minute, the rest logged
 USERNAME_RETRY_S = 60.0      # how often a failed startup getMe is retried when a /cmd@name needs it
+BARE_CAPTIONS = (
+    "MISSING ARGUMENT",
+    "/gif what, exactly?",
+    "this space intentionally left blank",
+    "nothing to gif. the void stares back.",
+)
 # Telegram's stand-in senders: anonymous admins, "send as channel" posters and linked-channel forwards
 TELEGRAM_SERVICE_IDS = frozenset({1087968824, 136817688, 777000})
 FATAL_API_CODES = (401, 404)   # Unauthorized / Not Found on the bot URL: the token itself is wrong
-_EXT_FOR_MIME = {"video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm"}
+_EXT_FOR_MIME = {
+    "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm",
+    "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+    "image/webp": "webp", "image/gif": "gif",
+}
+STILL_MAX_DIM = 8192         # photos are scaled down at cook time; refuse only the absurd
 
 COMMANDS = [
     {"command": "start", "description": "What this bot does"},
     {"command": "help", "description": "How to use it"},
     {"command": "recipes", "description": "List the cookbook"},
     {"command": "remix", "description": "Reply to a GIF I sent to reopen its knobs"},
-    {"command": "gif", "description": "Reply to a video in a group to GIF it"},
+    {"command": "gif", "description": "GIF a photo, video, or some words (or reply to one)"},
 ]
 
 HELP_TEXT = (
-    "Send me a video and I turn it into a looping GIF you tune with buttons.\n\n"
+    "Send a photo or a video, or /gif some words, and I turn it into a looping GIF "
+    "you tune with buttons.\n\n"
+    "• /gif is the front door: reply to a photo, a video or a sentence, or /gif dog.\n"
+    "• Bare /gif with nothing to work with still answers — a tiny 'missing argument' GIF.\n"
+    "• A sentence tries Wikimedia Commons for a still, then falls back to a local typecard.\n"
     "• Every button press re-renders the preview in place.\n"
     "• The top row of buttons switches recipes; /recipes describes them.\n"
     "• ✎ buttons ask for text — just reply to the prompt.\n"
@@ -142,12 +153,13 @@ HELP_TEXT = (
     "• Reply /remix to any GIF I sent you to reopen its knobs.\n"
     "• ⌘ Show CLI prints the command that reproduces the render.\n\n"
     f"Clips are rendered {SEGMENT_CAP_S:g} s at a time — slide the in/out points to pick the part.\n\n"
-    "In groups: reply /gif to a video and I'll answer with the preview and its buttons. "
-    "Only the person who sent /gif can press them; everyone gets a daily allowance of renders."
+    "In groups everyone in the room is trusted: reply /gif to a photo, a video or a sentence "
+    "and I'll answer with the preview and its buttons. Only the person who sent /gif can press them."
 )
 
 CookFn = Callable[..., CookResult]
 ProbeFn = Callable[[str], ffmpeg.Probe]
+FetchFn = Callable[[str, str], str]
 Job = Callable[[], None]
 
 
@@ -172,6 +184,52 @@ def _media_of(msg: dict) -> dict | None:
     if isinstance(doc, dict) and str(doc.get("mime_type", "")).startswith("video/"):
         return doc
     return None
+
+
+def _photo_of(msg: dict) -> dict | None:
+    """The largest photo size, or an image/* document. None when the message has no still."""
+    photos = msg.get("photo")
+    if isinstance(photos, list):
+        sizes = [p for p in photos if isinstance(p, dict) and p.get("file_id")]
+        if sizes:
+            return max(sizes, key=lambda p: int(p.get("file_size") or 0) or int(p.get("width") or 0))
+    doc = msg.get("document")
+    if isinstance(doc, dict) and str(doc.get("mime_type", "")).startswith("image/"):
+        return doc
+    return None
+
+
+def _seed_media(msg: dict) -> tuple[dict | None, str | None]:
+    """``(media, 'photo'|'video')`` for a message that can seed a session, else ``(None, None)``."""
+    photo = _photo_of(msg)
+    if photo is not None:
+        return photo, "photo"
+    video = _media_of(msg)
+    if video is not None:
+        return video, "video"
+    return None, None
+
+
+def _text_of(msg: dict) -> str:
+    """Plain text or caption of a message, stripped; empty when there isn't one."""
+    for key in ("text", "caption"):
+        value = msg.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _command_args(text: str) -> str:
+    """``'/gif dog'`` -> ``'dog'``; empty when the command carried no rest."""
+    parts = text.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _ext_for(media: dict, kind: str) -> str:
+    mime = str(media.get("mime_type", "")).lower()
+    if mime in _EXT_FOR_MIME:
+        return _EXT_FOR_MIME[mime]
+    return "jpg" if kind == "photo" else "mp4"
 
 
 def _sent_file(resp: dict) -> dict | None:
@@ -311,7 +369,7 @@ class Daemon:
 
     def __init__(self, config: config_mod.Config, api: BotAPI, store: Store, queue: RenderQueue,
                  cookbook: dict[str, recipe.RecipeDef], cook_fn: CookFn | None = None,
-                 probe_fn: ProbeFn | None = None) -> None:
+                 probe_fn: ProbeFn | None = None, fetch_fn: FetchFn | None = None) -> None:
         self.config = config
         self.api = api
         self.store = store
@@ -319,6 +377,7 @@ class Daemon:
         self.cookbook = cookbook
         self.cook_fn: CookFn = cook_fn or cook
         self.probe_fn: ProbeFn = probe_fn or ffmpeg.probe
+        self.fetch_fn: FetchFn = fetch_fn or fetch_image
         self.home = config.home
         self.pid_path = os.path.join(self.home, PIDFILE)
         self.offset_path = os.path.join(self.home, OFFSET_FILE)
@@ -553,15 +612,16 @@ class Daemon:
         """Who is served: ``(uid, is_guest)``, or None for a stranger (silence, logged once).
 
         The allowlist (owner + friends) is served everywhere. In a group
-        every other member is a *guest*, served under the guest quota; in a
-        DM they are a stranger. A guest exists only inside a group.
+        every other member is trusted too — the owner put the bot in the
+        room on purpose — so ``is_guest`` is False and the guest quota is
+        not a gate. In a DM a non-allowlisted sender is a stranger.
         """
         uid = (from_user or {}).get("id")
         if isinstance(uid, int):
             if uid in self.config.allowed:
                 return uid, False
             if group:
-                return uid, True
+                return uid, False
         if uid not in self._silenced:
             self._silenced.add(uid)
             log.warning("dropping update from non-allowlisted user %s", uid)
@@ -670,13 +730,13 @@ class Daemon:
             else:
                 log.debug("ignoring a non-command message from user %s in group %s", uid, chat_id)
             return
-        media = _media_of(msg)
+        media, kind = _seed_media(msg)
         if media is not None:
-            self._on_video(media, uid, chat_id)
+            self._on_media(media, uid, chat_id, kind=kind)
         elif isinstance(text, str):
             self._on_text(text, uid, chat_id)
         else:
-            self.api.send_message(chat_id, "Send me a video (mp4/mov/webm) to start, or /help.")
+            self.api.send_message(chat_id, "Send a photo or a video, or /gif some words. /help for how.")
 
     def _handle_command(self, command: str, msg: dict, uid: int, chat_id: int, *,
                         target: str | None = None, group: bool = False, origin: int | None = None,
@@ -686,12 +746,14 @@ class Daemon:
         if group and target is not None and not ours:
             return
         if command == "gif":
-            self._on_gif(msg, uid, chat_id, origin=origin, guest=guest)
+            raw = msg.get("text")
+            self._on_gif(msg, uid, chat_id, origin=origin, guest=guest,
+                         args=_command_args(raw if isinstance(raw, str) else ""))
         elif command == "start":
             self._nag(chat_id, uid, GROUP_START if group else (
-                f"Hi! Send me a video (up to {_mb(self.config.max_upload_bytes)}, "
-                f"{self.config.max_duration_s:.0f} s) and I'll turn it into a looping GIF "
-                "you can tune with buttons. /help for the details."), origin, guest)
+                f"Hi! Send a photo or a video (up to {_mb(self.config.max_upload_bytes)}, "
+                f"{self.config.max_duration_s:.0f} s), or /gif some words, and I'll turn it "
+                "into a looping GIF you can tune with buttons. /help for the details."), origin, guest)
         elif command == "help":
             self._nag(chat_id, uid, HELP_TEXT, origin, guest)
         elif command == "recipes":
@@ -705,27 +767,59 @@ class Daemon:
             self._nag(chat_id, uid, f"I don't know /{command}. Try /help.", origin, guest)
 
     def _on_gif(self, msg: dict, uid: int, chat_id: int, *, origin: int | None = None,
-                guest: bool = False) -> None:
-        """``/gif`` in reply to a video: the upload path, with the replied-to message as the upload."""
-        media = _media_of(msg.get("reply_to_message") or {})
-        if media is None:
-            self._nag(chat_id, uid, GIF_HINT, origin, guest)
-            return
-        if guest and self.config.guest_per_day_quota <= 0:
-            self._nag(chat_id, uid, GROUP_OFF, origin, guest)
-            return
-        self._on_video(media, uid, chat_id, origin=origin, guest=guest)
+                guest: bool = False, args: str = "") -> None:
+        """``/gif`` obtains a seed, then opens the foundry on it.
 
-    def _on_video(self, media: dict, uid: int, chat_id: int, *, origin: int | None = None,
-                  guest: bool = False) -> None:
+        Reply media (photo, video, animation, image/video document) wins;
+        else the replied-to text; else ``/gif <words>``; else a bare
+        typecard. A guest flag is accepted for the call shape but groups
+        are trusted, so it does not gate this flow.
+        """
+        reply = msg.get("reply_to_message") or {}
+        media, kind = _seed_media(reply)
+        if media is not None:
+            intention = _text_of(reply) or args
+            self._on_media(media, uid, chat_id, origin=origin, guest=guest,
+                           kind=kind or "video", intention=intention)
+            return
+        intention = _text_of(reply) or args
+        if intention:
+            self._on_intention(intention, uid, chat_id, origin=origin, guest=guest)
+            return
+        self._on_bare_gif(uid, chat_id, origin=origin, guest=guest)
+
+    def _on_bare_gif(self, uid: int, chat_id: int, *, origin: int | None = None,
+                     guest: bool = False) -> None:
+        """Nothing to GIF: a self-aware typecard, not a crash and not silence."""
+        caption = BARE_CAPTIONS[uid % len(BARE_CAPTIONS)]
+        self._on_intention(caption, uid, chat_id, origin=origin, guest=guest, bare=True)
+
+    def _on_intention(self, text: str, uid: int, chat_id: int, *, origin: int | None = None,
+                      guest: bool = False, bare: bool = False) -> None:
+        """Web-fetch a still for ``text``, or fall back to a local typecard."""
+        if (busy := self._busy(uid)) is not None:
+            self._nag(chat_id, uid, busy, origin, guest)
+            return
+        used = self._user_bytes(uid)
+        if used > self.config.max_user_bytes:
+            self._nag(
+                chat_id, uid, f"Your clips here add up to {_mb(used)}, and I keep at most "
+                f"{_mb(self.config.max_user_bytes)} per person. Clips behind your exports stay "
+                f"so /remix keeps working; the rest clears once its session has sat idle for "
+                f"{self.config.retention_days:g} days.", origin, guest)
+            return
+        self._pending_text.pop((chat_id, uid), None)
+        self._submit(uid, chat_id, self._intention_job(text, uid, chat_id, origin, bare=bare),
+                     origin=origin)
+
+    def _on_media(self, media: dict, uid: int, chat_id: int, *, origin: int | None = None,
+                  guest: bool = False, kind: str = "video", intention: str = "") -> None:
         """Gate an upload on what Telegram already told us, then hand the ingest to the worker.
 
         Nothing here waits on the network or on ffprobe: the size, queue and
         disk-budget gates need only the message, and the download + probe
         run as the user's queued job, so a slow or hostile upload costs its
-        sender their one slot, not everyone the poll loop. A guest is
-        charged last, once every other gate has let them through, and a
-        spent one costs no disk.
+        sender their one slot, not everyone the poll loop.
         """
         cap = self.config.max_upload_bytes
         size = media.get("file_size")
@@ -744,17 +838,21 @@ class Daemon:
                 f"so /remix keeps working; the rest clears once its session has sat idle for "
                 f"{self.config.retention_days:g} days.", origin, guest)
             return
-        if guest and (why := self._charge_guest(uid, chat_id)) is not None:
-            self._nag(chat_id, uid, why, origin, guest)
-            return
         self._pending_text.pop((chat_id, uid), None)
-        self._submit(uid, chat_id, self._ingest_job(media, uid, chat_id, origin), origin=origin)
+        self._submit(uid, chat_id, self._ingest_job(media, uid, chat_id, origin,
+                                                    kind=kind, intention=intention), origin=origin)
 
-    def _ingest_job(self, media: dict, uid: int, chat_id: int, origin: int | None = None) -> Job:
+    def _on_video(self, media: dict, uid: int, chat_id: int, *, origin: int | None = None,
+                  guest: bool = False) -> None:
+        """Back-compat alias: a video seed."""
+        self._on_media(media, uid, chat_id, origin=origin, guest=guest, kind="video")
+
+    def _ingest_job(self, media: dict, uid: int, chat_id: int, origin: int | None = None,
+                    *, kind: str = "video", intention: str = "") -> Job:
         """The queued half of an upload: fetch, probe, open the session, render its first preview."""
         def run() -> None:
             try:
-                token = self._ingest(media, uid, chat_id, origin)
+                token = self._ingest(media, uid, chat_id, origin, kind=kind, intention=intention)
             except _Rejected as why:
                 self._tell(chat_id, str(why), origin)
                 return
@@ -764,34 +862,126 @@ class Daemon:
             self._job(token, self._render_preview)()
         return run
 
-    def _ingest(self, media: dict, uid: int, chat_id: int, origin: int | None = None) -> str:
+    def _intention_job(self, text: str, uid: int, chat_id: int, origin: int | None = None,
+                       *, bare: bool = False) -> Job:
+        """Queued half of a text seed: Commons fetch, local typecard fallback, first preview."""
+        def run() -> None:
+            try:
+                token, note = self._ingest_intention(text, uid, chat_id, origin, bare=bare)
+            except _Rejected as why:
+                self._tell(chat_id, str(why), origin)
+                return
+            except Exception as exc:
+                self._report_failure(chat_id, exc, f"intention from user {uid}", origin)
+                return
+            if note:
+                self._tell(chat_id, note, origin)
+            self._job(token, self._render_preview)()
+        return run
+
+    def _ingest(self, media: dict, uid: int, chat_id: int, origin: int | None = None,
+                *, kind: str = "video", intention: str = "") -> str:
         """Download and probe one upload; return the token of its new session (``_Rejected`` otherwise)."""
         cap = self.config.max_upload_bytes
-        self.api.send_chat_action(chat_id, "upload_video")
+        self.api.send_chat_action(chat_id, "upload_photo" if kind == "photo" else "upload_video")
         info = self.api.get_file(media["file_id"])
-        ext = _EXT_FOR_MIME.get(str(media.get("mime_type", "")).lower(), "mp4")
+        ext = _ext_for(media, kind)
         upload_dir = os.path.join(self.home, "uploads", str(uid))
         os.makedirs(upload_dir, exist_ok=True)
         # hex, never token_urlsafe: a name starting with "-" would read as an option in the ⌘ Show CLI line
         dest = os.path.join(upload_dir, f"{secrets.token_hex(6)}.{ext}")
         try:
             self._download(info["file_path"], dest, cap)
-            probe = self._probe_checked(dest)
+            probe = self._probe_checked(dest, still_ok=(kind == "photo"))
         except _Rejected:
             _unlink(dest)
             raise
 
-        inst = recipe.defaults(self.cookbook[DEFAULT_RECIPE])
+        name = self._recipe_for_seed(kind, probe)
+        inst = recipe.defaults(self.cookbook[name])
         inst["input"] = dest
-        if probe.duration > 0:
-            self._clip_ends[dest] = probe.duration
-            inst["from"] = recipe.fmt_time(0.0)
-            inst["to"] = recipe.fmt_time(probe.duration)
-            _clamp_segment(inst)
+        self._prime_trim(inst, probe, dest)
+        self._apply_caption(inst, name, intention)
         token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
-        log.info("session %s for user %s: %s (%.1fs %dx%d)", token, uid, dest,
+        log.info("session %s for user %s: %s %s (%.1fs %dx%d)", token, uid, name, dest,
                  probe.duration, probe.width, probe.height)
         return token
+
+    def _ingest_intention(self, text: str, uid: int, chat_id: int, origin: int | None = None,
+                          *, bare: bool = False) -> tuple[str, str | None]:
+        """Obtain a seed for ``text``: Commons still, else a typecard. Returns (token, note)."""
+        upload_dir = os.path.join(self.home, "uploads", str(uid))
+        os.makedirs(upload_dir, exist_ok=True)
+        note = None
+        src = None
+        if not bare:
+            self.api.send_chat_action(chat_id, "upload_photo")
+            try:
+                src = self.fetch_fn(text, upload_dir)
+            except FetchError as err:
+                log.info("web seed failed for %r: %s", text[:80], err)
+                note = f"Couldn't fetch a picture ({err}); made a typecard instead."
+            except Exception:
+                log.exception("web seed crashed for %r", text[:80])
+                note = "Couldn't fetch a picture; made a typecard instead."
+                src = None
+        if src:
+            try:
+                probe = self._probe_checked(src, still_ok=True)
+            except _Rejected as why:
+                _unlink(src)
+                src = None
+                note = f"{why} Made a typecard instead."
+            else:
+                name = self._recipe_for_seed("photo", probe)
+                inst = recipe.defaults(self.cookbook[name])
+                inst["input"] = src
+                self._prime_trim(inst, probe, src)
+                self._apply_caption(inst, name, text)
+                token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
+                log.info("session %s for user %s: web seed %s -> %s", token, uid, text[:40], src)
+                return token, note
+        name = TEXT_RECIPE if TEXT_RECIPE in self.cookbook else DEFAULT_RECIPE
+        inst = recipe.defaults(self.cookbook[name])
+        self._apply_caption(inst, name, text)
+        token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
+        log.info("session %s for user %s: typecard %r", token, uid, text[:40])
+        return token, note
+
+    def _recipe_for_seed(self, kind: str, probe: ffmpeg.Probe) -> str:
+        if (kind == "photo" or ffmpeg.is_still(probe)) and PHOTO_RECIPE in self.cookbook:
+            return PHOTO_RECIPE
+        return DEFAULT_RECIPE if DEFAULT_RECIPE in self.cookbook else next(iter(self.cookbook))
+
+    def _prime_trim(self, inst: dict, probe: ffmpeg.Probe, path: str) -> None:
+        """Set from/to from the probe when the recipe has a trim knob; stills get a hold length."""
+        defn = self.cookbook.get(inst.get("recipe"))
+        has_trim = defn is not None and any(k.type == "range" for k in defn.knobs)
+        if ffmpeg.is_still(probe) or probe.duration <= 0:
+            if has_trim:
+                self._clip_ends[path] = STILL_HOLD_S
+                inst["from"] = recipe.fmt_time(0.0)
+                inst["to"] = recipe.fmt_time(STILL_HOLD_S)
+            return
+        self._clip_ends[path] = probe.duration
+        inst["from"] = recipe.fmt_time(0.0)
+        inst["to"] = recipe.fmt_time(probe.duration)
+        _clamp_segment(inst)
+
+    def _apply_caption(self, inst: dict, recipe_name: str, text: str) -> None:
+        """Fill ``caption.text`` when the recipe has that knob and ``text`` is non-empty."""
+        if not text:
+            return
+        defn = self.cookbook.get(recipe_name)
+        if defn is None:
+            return
+        knob = next((k for k in defn.knobs if k.key == "caption.text"), None)
+        if knob is None:
+            return
+        value = text.strip()
+        if knob.max_len is not None:
+            value = value[:knob.max_len]
+        recipe.set_(inst, knob.key, value)
 
     def _download(self, file_path: str, dest: str, cap: int) -> None:
         try:
@@ -801,7 +991,7 @@ class Daemon:
                 raise _Rejected(f"That file is over {_mb(cap)}. Trim it and resend.") from None
             raise
 
-    def _probe_checked(self, path: str) -> ffmpeg.Probe:
+    def _probe_checked(self, path: str, *, still_ok: bool = False) -> ffmpeg.Probe:
         """Probe an upload and refuse it (``_Rejected``) when it breaks a limit."""
         try:
             probe = self.probe_fn(path)
@@ -809,7 +999,13 @@ class Daemon:
             if self._stopping:            # a terminal's Ctrl-C reached ffprobe too: not the clip's fault
                 raise _Rejected(SHUT_DOWN_MID_RENDER) from None
             log.warning("probe rejected %s: %s", path, err)
-            raise _Rejected("I couldn't read that as a video. Send an mp4, mov or webm.") from None
+            raise _Rejected("I couldn't read that as a photo or video. Send a jpeg, png, mp4, mov or webm.") from None
+        still = ffmpeg.is_still(probe) or (still_ok and probe.duration <= 0)
+        if still:
+            if max(probe.width, probe.height) > STILL_MAX_DIM:
+                raise _Rejected(f"That still is {probe.width}×{probe.height}; I take up to "
+                                f"{STILL_MAX_DIM} px on the long side.")
+            return probe
         if probe.duration > self.config.max_duration_s:
             raise _Rejected(f"That clip is {probe.duration:.1f} s; I take up to "
                             f"{self.config.max_duration_s:.0f} s. Trim it and resend.")
@@ -824,13 +1020,13 @@ class Daemon:
         key = (chat_id, uid)
         pending = self._pending_text.get(key)
         if pending is None:
-            self._say(chat_id, "Send me a video to start, or /help.", origin)
+            self._say(chat_id, "Send a photo or a video, or /gif some words. /help for how.", origin)
             return
         token, knob_idx = pending
         sess = self.store.get(token)
         if sess is None:
             del self._pending_text[key]
-            self._say(chat_id, "That session has expired — send the video again.", origin)
+            self._say(chat_id, "That session has expired — send a photo or /gif again.", origin)
             return
         defn = self._defn(sess)
         knob = _text_knob(defn, knob_idx)
@@ -875,9 +1071,11 @@ class Daemon:
         inst = entry.recipe
         src = inst.get("input")
         if isinstance(src, str) and not os.path.isfile(src):
-            self._nag(chat_id, uid, "The clip behind that export is no longer on disk — send it again to start over.",
-                      origin, guest)
-            return
+            defn = self.cookbook.get(inst.get("recipe"))
+            if defn is None or defn.needs_input:
+                self._nag(chat_id, uid, "The clip behind that export is no longer on disk — send it again to start over.",
+                          origin, guest)
+                return
         if (busy := self._busy(uid)) is not None:
             self._nag(chat_id, uid, busy, origin, guest)
             return
@@ -932,7 +1130,7 @@ class Daemon:
             return STALE_BUTTON
         sess = self.store.get(cb.session)
         if sess is None:
-            return "That session has expired — send the video again."
+            return "That session has expired — send a photo or /gif again."
         if sess.user_id != uid:
             return "That's someone else's session."
         defn = self._defn(sess)
@@ -1013,10 +1211,17 @@ class Daemon:
             return busy
         if guest and (why := self._charge_guest(uid, sess.chat_id)) is not None:
             return why
+        if target.needs_input:
+            src = sess.recipe.get("input")
+            if not isinstance(src, str) or not src:
+                return "That recipe needs a photo or clip — reply /gif to one, or stay on typecard."
         inst = recipe.defaults(target)
         for key in ("input", "from", "to"):
             if sess.recipe.get(key) is not None:
                 inst[key] = sess.recipe[key]
+        carried = recipe.get(sess.recipe, "caption.text")
+        if isinstance(carried, str) and carried and any(k.key == "caption.text" for k in target.knobs):
+            self._apply_caption(inst, target.name, carried)
         self._pending_text.pop((sess.chat_id, sess.user_id), None)
         self.store.update(cb.session, inst)
         return self._submit(uid, sess.chat_id, self._job(cb.session, self._render_again), quiet=True,
@@ -1226,7 +1431,10 @@ class Daemon:
         loop = report.get("loop")
         if loop and loop != "seamless":
             parts.append(f"loop: {loop}")   # e.g. "boomerang (degraded)" — never hide a degrade
-        return " · ".join(parts) + "\nTweak with the buttons; ⬇ Export when it's right."
+        line = " · ".join(parts) + "\nTweak with the buttons; ⬇ Export when it's right."
+        if inst.get("recipe") == TEXT_RECIPE and not inst.get("input"):
+            line += "\nReply /gif to a photo, a video or a sentence — or /gif <words>."
+        return line
 
 
 def main(argv: list[str] | None = None) -> int:
