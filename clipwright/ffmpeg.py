@@ -44,7 +44,7 @@ OVERLAY_POSITIONS = {"bottom": "overlay=0:main_h-overlay_h", "top": "overlay=0:0
 
 # ffprobe `format_name` values `probe` accepts: self-contained demuxers only.
 # Playlist-style formats (dash, hls, concat, ...) fetch what they reference.
-CONTAINERS = frozenset({
+VIDEO_CONTAINERS = frozenset({
     "mov,mp4,m4a,3gp,3g2,mj2",   # .mp4 / .mov / .m4v (what phones and Telegram send)
     "matroska,webm",             # .webm / .mkv
     "gif",
@@ -52,6 +52,13 @@ CONTAINERS = frozenset({
     "mpegts",
     "mpeg",
 })
+# Still-image demuxers. A JPEG/PNG/WebP is a one-frame "video" as far as
+# ffmpeg is concerned; Ken Burns / still-hold turn it into a clip.
+IMAGE_CONTAINERS = frozenset({
+    "jpeg_pipe", "png_pipe", "webp_pipe", "bmp_pipe", "ppm_pipe", "tiff_pipe",
+    "image2", "mjpeg",
+})
+CONTAINERS = VIDEO_CONTAINERS | IMAGE_CONTAINERS
 
 # Every accepted container opens with binary (an atom size, an EBML id, a
 # GIF screen descriptor, a RIFF size, a sync byte); every referencing format
@@ -129,6 +136,7 @@ class Probe:
     has_audio: bool
     size_bytes: int
     rotation: int = 0
+    still: bool = False          # True for a one-frame image (jpeg/png/webp, …)
 
 
 def _parse_rate(text: str | None) -> float:
@@ -182,10 +190,16 @@ def _looks_like_text(path: str) -> bool:
     return all(ch >= " " or ch in _TEXT_CONTROLS for ch in text)
 
 
+def is_still(probe: Probe) -> bool:
+    """True when ``probe`` describes a still image, not a clip with duration."""
+    return bool(probe.still) or (probe.nb_frames <= 1 and probe.duration <= 0)
+
+
 def probe(path: str) -> Probe:
     """ffprobe the file. Raises FFmpegError if it is missing, is a text file
     (a manifest or playlist), has no video stream, or is not one of the
-    CONTAINERS this engine renders from."""
+    CONTAINERS this engine renders from. Still images (jpeg/png/webp) are
+    accepted: ``still`` is True and ``duration`` is 0."""
     argv = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path]
     if not os.path.isfile(path):
         raise FFmpegError(argv, f"input is not a file: {path}")
@@ -217,6 +231,15 @@ def probe(path: str) -> Probe:
         nb_frames = int(video.get("nb_frames"))
     except (TypeError, ValueError):
         nb_frames = int(round(duration * fps))
+    image = container in IMAGE_CONTAINERS
+    still = image or (nb_frames <= 1 and duration <= 0)
+    if still:
+        if duration <= 0:
+            duration = 0.0
+        if nb_frames <= 0:
+            nb_frames = 1
+        if fps <= 0:
+            fps = 25.0
     size_bytes = int(_parse_float(fmt.get("size"), 0)) or os.path.getsize(path)
     width, height = int(video.get("width") or 0), int(video.get("height") or 0)
     rotation = _rotation(video)
@@ -233,6 +256,7 @@ def probe(path: str) -> Probe:
         has_audio=any(s.get("codec_type") == "audio" for s in streams),
         size_bytes=size_bytes,
         rotation=rotation,
+        still=still,
     )
 
 
@@ -359,6 +383,61 @@ def mp4_argv(
             "-movflags", "+faststart", "-an", str(out),
         ]
     )
+
+
+def still_hold_argv(src: str, out: str, *, width, fps, duration_s) -> list[str]:
+    """Hold a still image as an H.264 clip of ``duration_s`` at ``fps`` × ``width``.
+
+    ``-loop 1`` is an input option (before ``-i``). The filter string is
+    numbers and fixed tokens only.
+    """
+    return (
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-loop", "1", "-t", _seconds(duration_s), "-i", str(src),
+         "-vf", f"fps={_num(fps)},scale={even(width)}:-2:flags=lanczos",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(out)]
+    )
+
+
+def kenburns_argv(src: str, out: str, *, width, height, fps, duration_s, zoom=1.4) -> list[str]:
+    """Slow zoom (Ken Burns) of a still into an H.264 clip.
+
+    The zoompan expression is a fixed template filled with numbers: no
+    caller-supplied text enters the filtergraph.
+    """
+    frames = max(2, int(round(float(fps) * float(duration_s))))
+    z_end = max(1.05, float(zoom))
+    z_step = (z_end - 1.0) / (frames - 1)
+    w, h = even(width), even(height)
+    sw, sh = even(w * 4), even(h * 4)
+    vf = (
+        f"scale={sw}:{sh}:flags=lanczos,"
+        f"zoompan=z='min(zoom+{_num(z_step)},{_num(z_end)})'"
+        f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        f":d={frames}:s={w}x{h}:fps={_num(fps)}"
+    )
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-loop", "1", "-i", str(src),
+        "-vf", vf,
+        "-frames:v", str(frames),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(out),
+    ]
+
+
+def first_frame_argv(src: str, out: str) -> list[str]:
+    """Grab the first frame of a clip (or still) as an image at ``out``."""
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(src), "-frames:v", "1", str(out)]
+
+
+def image_seq_argv(pattern: str, out: str, *, fps) -> list[str]:
+    """Encode a ``frame_%04d.png``-style sequence (start number 1) to H.264."""
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-framerate", _num(fps), "-i", str(pattern),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(out),
+    ]
 
 
 def gifsicle_argv(

@@ -1,0 +1,81 @@
+# ken-burns — slow zoom over a still (or the first frame of a clip).
+name        = "ken-burns"
+blurb       = "Ken Burns a still: slow zoom, optional caption."
+emoji       = "📷"
+pipeline    = "ken_burns"
+needs_input = true
+
+[[knob]]
+key     = "caption.text"
+label   = "Text"
+type    = "text"
+max     = 60
+default = ""
+
+[[knob]]
+key     = "caption.size"
+label   = "Size"
+type    = "step"
+min     = 24
+max     = 160
+step    = 8
+default = 64
+
+[[knob]]
+key     = "caption.color"
+label   = "Colour"
+type    = "enum"
+values  = ["#ffffff", "#ffdd00", "#ff4444", "#44ff88"]
+labels  = ["⬜ White", "🟨 Yellow", "🟥 Red", "🟩 Green"]
+default = "#ffffff"
+
+[[knob]]
+key     = "caption.pos"
+label   = "Position"
+type    = "enum"
+values  = ["top", "bottom"]
+labels  = ["⬆️ Top", "⬇️ Bottom"]
+default = "bottom"
+
+[[knob]]
+key     = "zoom"
+label   = "Zoom"
+type    = "enum"
+values  = [1.2, 1.4, 1.6, 1.9]
+labels  = ["1.2×", "1.4×", "1.6×", "1.9×"]
+default = 1.4
+
+[[knob]]
+key     = "duration"
+label   = "Length"
+type    = "step"
+min     = 2
+max     = 6
+step    = 1
+default = 3
+
+[[knob]]
+key     = "fps"
+label   = "FPS"
+type    = "step"
+min     = 8
+max     = 30
+step    = 2
+default = 15
+
+[[knob]]
+key     = "width"
+label   = "Width"
+type    = "step"
+min     = 240
+max     = 640
+step    = 40
+default = 480
+
+[[knob]]
+key     = "fits"
+label   = "Fits"
+type    = "enum"
+values  = ["telegram", "discord", "slack"]
+labels  = ["✈️ Telegram", "🎮 Discord", "💼 Slack"]
+default = "telegram"

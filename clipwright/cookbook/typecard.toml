@@ -1,0 +1,73 @@
+# typecard — kinetic caption card from words alone; no input footage.
+name        = "typecard"
+blurb       = "A kinetic caption card from words alone."
+emoji       = "🃏"
+pipeline    = "typecard"
+needs_input = false
+
+[[knob]]
+key     = "caption.text"
+label   = "Text"
+type    = "text"
+max     = 80
+default = ""
+
+[[knob]]
+key     = "caption.size"
+label   = "Size"
+type    = "step"
+min     = 24
+max     = 160
+step    = 8
+default = 72
+
+[[knob]]
+key     = "caption.color"
+label   = "Colour"
+type    = "enum"
+values  = ["#ffffff", "#ffdd00", "#ff4444", "#44ff88"]
+labels  = ["⬜ White", "🟨 Yellow", "🟥 Red", "🟩 Green"]
+default = "#ffffff"
+
+[[knob]]
+key     = "bg"
+label   = "Background"
+type    = "enum"
+values  = ["#121220", "#200e0e", "#0e1c12", "#0e1224", "#24180a", "#1c0c1e"]
+labels  = ["⬛ Night", "🟥 Ember", "🟩 Moss", "🟦 Ink", "🟫 Rust", "🟪 Plum"]
+default = "#121220"
+
+[[knob]]
+key     = "duration"
+label   = "Length"
+type    = "step"
+min     = 2
+max     = 6
+step    = 1
+default = 3
+
+[[knob]]
+key     = "fps"
+label   = "FPS"
+type    = "step"
+min     = 8
+max     = 24
+step    = 2
+default = 12
+
+[[knob]]
+key     = "width"
+label   = "Width"
+type    = "step"
+min     = 240
+max     = 640
+step    = 40
+default = 480
+
+[[knob]]
+key     = "fits"
+label   = "Fits"
+type    = "enum"
+values  = ["telegram", "discord", "slack"]
+labels  = ["✈️ Telegram", "🎮 Discord", "💼 Slack"]
+default = "telegram"

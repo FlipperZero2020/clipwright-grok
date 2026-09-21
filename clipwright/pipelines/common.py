@@ -27,6 +27,8 @@ DEFAULT_WIDTH = 480          # full-mode width for recipes without a width knob
 PROXY_WIDTH = 240
 PROXY_FPS = 12
 SEGMENT_CAP_S = 15.0         # one cap for both modes, so the preview's loop is the export's loop
+STILL_HOLD_S = 3.0           # a still becomes this many seconds of clip (gifify / caption-loop / …)
+STILL_HOLD_FPS = 12
 LOOP_MIN_S = 1.0             # shorter segments skip the loop finder
 LOOP_SAMPLE_FPS = 10
 LOOP_SAMPLE_WIDTH = 64
@@ -63,6 +65,29 @@ class LoopPlan:
     to_s: float
     nudge_frames: int | None = None  # out-point shift in loop-finder frames (LOOP_SAMPLE_FPS)
     score: float | None = None       # seam score from loopfind.best_loop
+
+
+def materialize_still(src: str, probe: Probe, inst: dict, ctx: CookContext) -> tuple[str, Probe]:
+    """If ``src`` is a still image, hold it as a short H.264 clip and re-probe.
+
+    Clip recipes (gifify, caption-loop, boomerang) need duration; a JPEG has
+    none. The hold is long enough for the instance's ``to`` (or STILL_HOLD_S)
+    and never longer than SEGMENT_CAP_S. Videos pass through unchanged.
+    """
+    if not ffmpeg.is_still(probe):
+        return src, probe
+    hold_s = STILL_HOLD_S
+    if inst.get("to") is not None:
+        end = recipe.parse_time(inst["to"])
+        start = recipe.parse_time(inst["from"]) if inst.get("from") is not None else 0.0
+        hold_s = max(hold_s, end - start, end)
+    hold_s = min(max(0.5, hold_s), SEGMENT_CAP_S)
+    width = even(min(int(recipe.get(inst, "width", DEFAULT_WIDTH) or DEFAULT_WIDTH),
+                     probe.width or DEFAULT_WIDTH))
+    dest = os.path.join(ctx.workdir, "still-hold.mp4")
+    ffmpeg.run(ffmpeg.still_hold_argv(src, dest, width=width, fps=STILL_HOLD_FPS, duration_s=hold_s),
+               log=ctx.log)
+    return dest, ffmpeg.probe(dest)
 
 
 def resolve_segment(inst: dict, probe: Probe) -> Segment:
@@ -146,6 +171,7 @@ def cook_clip(
     probe = ffmpeg.probe(src)
     if probe.width < 1 or probe.height < 1:
         raise ffmpeg.FFmpegError(["ffprobe", src], f"no usable frame size: {probe.width}x{probe.height}")
+    src, probe = materialize_still(src, probe, inst, ctx)
     seg = resolve_segment(inst, probe)
     plan = plan_loop(loop, src, seg, log=ctx.log)
 
