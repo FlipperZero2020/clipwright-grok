@@ -19,16 +19,21 @@ the top row switches recipes. Export cooks the real GIF, sends it as a
 document with its ``.recipe.toml`` sidecar, and ledgers the sent
 ``file_unique_id`` so ``/remix`` can reopen it later — for the user who
 exported it (or the owner): the recipe names that user's private upload.
-In a DM anyone not on the allowlist gets silence (logged once).
+In a DM anyone not on the allowlist gets silence (logged once). The
+allowlist is owner + ``CLIPWRIGHT_FRIEND_IDS`` **plus anyone seen in a
+served group** (or verified with ``getChatMember`` against a known
+room): once they are in the chat, they can DM the bot the same way
+friends do — photo or video without ``/gif``, full foundry. A true
+stranger who has never been in a room still gets silence.
 
 Groups are served too. A group is a room, not an inbox: only explicit
 commands are acted on, and ``/gif`` is the way in — reply to a photo,
 video or sentence, or ``/gif <words>``, or a bare ``/gif`` for a tiny
 self-aware typecard. Bare videos, chatter, stickers and joins are ignored
 without a word (other bots own the commands we do not know, unless one is
-addressed ``@us``). Everyone in a group the bot is in is trusted (the
-owner put it there on purpose); the allowlist is a DM gate, not a room
-gate. Everything the bot sends in a group is a reply — to the ``/gif``
+addressed ``@us``), but chatter still *remembers* the sender so their DMs
+work later. Everyone in a group the bot is in is trusted (the owner put
+it there on purpose). Everything the bot sends in a group is a reply — to the ``/gif``
 that opened the session (kept as ``origin_message_id``) or to the message
 that asked. Buttons and text prompts belong to the user who opened the
 session. Senders that are not one person — anonymous admins, members
@@ -154,8 +159,12 @@ HELP_TEXT = (
     "• ⌘ Show CLI prints the command that reproduces the render.\n\n"
     f"Clips are rendered {SEGMENT_CAP_S:g} s at a time — slide the in/out points to pick the part.\n\n"
     "In groups everyone in the room is trusted: reply /gif to a photo, a video or a sentence "
-    "and I'll answer with the preview and its buttons. Only the person who sent /gif can press them."
+    "and I'll answer with the preview and its buttons. Only the person who sent /gif can press them. "
+    "Once I've seen you in a group, you can DM me too — send a photo or a video, no /gif needed."
 )
+
+# ChatMember.status values that mean the user is still in the room.
+ROOM_MEMBER_STATUSES = frozenset({"creator", "administrator", "member", "restricted"})
 
 CookFn = Callable[..., CookResult]
 ProbeFn = Callable[[str], ffmpeg.Probe]
@@ -389,6 +398,9 @@ class Daemon:
         self._username_retry_at = 0.0                         # clock() before which a failed getMe is not retried
         self._silenced: set[int | None] = set()
         self._silenced_chats: set[int] = set()                # groups off CLIPWRIGHT_GROUP_IDS, logged once each
+        self._checked_rooms: dict[int, frozenset[int]] = {}   # uid -> group ids last getChatMember'd against
+        for chat_id in config.group_ids:
+            store.note_group(chat_id)
         self._nagged: dict[tuple[int, int, str], float] = {}  # (chat_id, user_id, text) -> clock() of the last send
         self._pending_text: dict[tuple[int, int], tuple[str, int]] = {}   # (chat_id, user_id) -> (token, knob_idx)
         self._waiting: dict[int, tuple[int, int | None]] = {}   # user_id -> (chat_id, origin) of their queued render
@@ -608,19 +620,75 @@ class Daemon:
 
     # -- gates ---------------------------------------------------------------
 
-    def _actor(self, from_user: dict | None, group: bool) -> tuple[int, bool] | None:
+    @staticmethod
+    def _real_person(user: dict | None) -> int | None:
+        """A single human's user id, or None for bots, service accounts, or a malformed ``from``."""
+        if not isinstance(user, dict) or user.get("is_bot"):
+            return None
+        uid = user.get("id")
+        if isinstance(uid, int) and uid not in TELEGRAM_SERVICE_IDS:
+            return uid
+        return None
+
+    def _remember_person(self, user: dict | None) -> None:
+        """Add a real person to the room-member allowlist (idempotent)."""
+        uid = self._real_person(user)
+        if uid is not None:
+            self.store.note_member(uid)
+
+    def _remember_joiners(self, msg: dict) -> None:
+        """Note everyone in ``new_chat_members`` so they can DM without speaking first."""
+        for user in msg.get("new_chat_members") or []:
+            self._remember_person(user if isinstance(user, dict) else None)
+
+    def _admit_from_rooms(self, uid: int) -> bool:
+        """``getChatMember`` against known served groups; True and notes them when they still belong.
+
+        A miss is remembered against the current room set so a stranger DMing
+        in a loop does not hammer Telegram. A newly learned group changes the
+        set and the next DM re-checks.
+        """
+        rooms = frozenset(self.store.list_groups())
+        if not rooms:
+            return False
+        if self._checked_rooms.get(uid) == rooms:
+            return False
+        self._checked_rooms[uid] = rooms
+        for chat_id in sorted(rooms):
+            try:
+                member = self.api.get_chat_member(chat_id, uid)
+            except BotAPIError as err:
+                log.debug("getChatMember chat %s user %s: %s", chat_id, uid, err)
+                continue
+            status = (member or {}).get("status")
+            if status in ROOM_MEMBER_STATUSES:
+                self.store.note_member(uid)
+                log.info("admitted user %s from group %s (%s)", uid, chat_id, status)
+                return True
+        return False
+
+    def _actor(self, from_user: dict | None, group: bool,
+               chat_id: int | None = None) -> tuple[int, bool] | None:
         """Who is served: ``(uid, is_guest)``, or None for a stranger (silence, logged once).
 
         The allowlist (owner + friends) is served everywhere. In a group
         every other member is trusted too — the owner put the bot in the
-        room on purpose — so ``is_guest`` is False and the guest quota is
-        not a gate. In a DM a non-allowlisted sender is a stranger.
+        room on purpose — so ``is_guest`` is False; they are also remembered
+        so a later DM works like a friend's. In a DM a sender is served if
+        they are on the allowlist, already a remembered room member, or
+        ``getChatMember`` says they still belong to a known served group.
+        Anyone else is a stranger.
         """
         uid = (from_user or {}).get("id")
         if isinstance(uid, int):
-            if uid in self.config.allowed:
-                return uid, False
             if group:
+                if chat_id is not None:
+                    self.store.note_group(chat_id)
+                self._remember_person(from_user)
+                return uid, False
+            if uid in self.config.allowed or self.store.is_member(uid):
+                return uid, False
+            if self._admit_from_rooms(uid):
                 return uid, False
         if uid not in self._silenced:
             self._silenced.add(uid)
@@ -706,6 +774,9 @@ class Daemon:
         chat_id = msg["chat"]["id"]
         if group and not self._group_served(chat_id):
             return
+        if group:
+            self.store.note_group(chat_id)
+            self._remember_joiners(msg)
         origin = msg.get("message_id") if group else None    # in a group, what every answer replies to
         text = msg.get("text")
         parsed = _command_of(text) if isinstance(text, str) else None
@@ -715,7 +786,7 @@ class Daemon:
             else:
                 log.debug("ignoring a message with no single sender in chat %s", chat_id)
             return
-        actor = self._actor(msg.get("from"), group)
+        actor = self._actor(msg.get("from"), group, chat_id)
         if actor is None:
             return
         uid, guest = actor
@@ -1104,7 +1175,7 @@ class Daemon:
         kind = _chat_kind(chat)
         if kind is None or (kind == "group" and not self._group_served(chat["id"])) or _impersonal(cq):
             return
-        actor = self._actor(cq.get("from"), kind == "group")
+        actor = self._actor(cq.get("from"), kind == "group", chat.get("id"))
         if actor is None:
             return
         uid, guest = actor

@@ -82,6 +82,7 @@ class FakeAPI:
         self.fail: dict[str, Exception] = {}
         self.fail_at: dict[str, int] = {}
         self.sent_docs: list[dict] = []   # the Document objects returned by send_document
+        self.members: dict[tuple[int, int], dict | BaseException] = {}
         self._msg_id = 100
 
     def of(self, method: str) -> list[dict]:
@@ -159,6 +160,13 @@ class FakeAPI:
     def get_me(self):
         self._record("getMe")
         return {"id": 42, "is_bot": True, "first_name": "Clipwright", "username": "Clipwright_Bot"}
+
+    def get_chat_member(self, chat_id, user_id):
+        self._record("getChatMember", chat_id=chat_id, user_id=user_id)
+        result = self.members.get((chat_id, user_id), {"user": {"id": user_id}, "status": "left"})
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     def get_file(self, file_id):
         self._record("getFile", file_id=file_id)
@@ -491,16 +499,91 @@ def test_group_ignores_everything_that_is_not_a_command(daemon, api):
     assert api.calls == []
 
 
-def test_a_guest_is_still_a_stranger_in_a_dm(daemon, api, caplog):
-    gif_in_group(daemon, api)                                # served in the group ...
-    served = len(api.calls)
+def test_a_group_member_can_dm_after_being_seen_in_the_room(daemon, api, store, cook):
+    """Once they /gif in the group, DMs work like a friend's: photo/video, no /gif needed."""
+    gif_in_group(daemon, api)
+    assert store.is_member(GUEST)
+    daemon.handle_update(msg("/start", uid=GUEST))
+    assert "Hi!" in api.texts()[-1] and api.of("sendMessage")[-1]["chat_id"] == CHAT
+    daemon.handle_update(msg(uid=GUEST, **video()))
+    dm = api.of("sendAnimation")[-1]
+    assert dm["chat_id"] == CHAT and dm.get("reply_to_message_id") is None
+    daemon.handle_update(gif_cmd(uid=GUEST, chat=CHAT))
+    assert api.of("sendAnimation")[-1]["chat_id"] == CHAT
+    daemon.handle_update(cb("a/AAAAAA/grid", uid=GUEST, chat=CHAT))
+    assert "expired" in (api.of("answerCallbackQuery")[-1].get("text") or "")
+
+
+def test_group_chatter_is_ignored_but_unlocks_dms(daemon, api, store):
+    daemon.handle_update(gmsg("just some words"))
+    assert api.calls == []
+    assert store.is_member(GUEST) and store.list_groups() == [GROUP]
+    daemon.handle_update(msg("/help", uid=GUEST))
+    assert "/gif" in api.texts()[-1] and "DM me too" in api.texts()[-1]
+
+
+def test_joiners_are_remembered_without_speaking(daemon, api, store):
+    daemon.handle_update(gmsg(uid=OWNER, new_chat_members=[_from(GUEST2)]))
+    assert api.calls == []
+    assert store.is_member(GUEST2) and store.is_member(OWNER)
+    daemon.handle_update(msg("/start", uid=GUEST2))
+    assert "Hi!" in api.texts()[-1]
+
+
+def test_lurker_is_admitted_when_getchatmember_says_they_are_in_the_room(daemon, api, store):
+    daemon.handle_update(gmsg("noise"))                   # learn the group; GUEST is remembered, GUEST2 is not
+    api.members[(GROUP, GUEST2)] = {"user": {"id": GUEST2}, "status": "member"}
+    daemon.handle_update(msg("/start", uid=GUEST2))
+    assert "Hi!" in api.texts()[-1]
+    assert api.of("getChatMember") == [{"chat_id": GROUP, "user_id": GUEST2}]
+    assert store.is_member(GUEST2)
+    n = len(api.of("getChatMember"))
+    daemon.handle_update(msg("/help", uid=GUEST2))        # remembered: no second lookup
+    assert len(api.of("getChatMember")) == n
+
+
+def test_lurker_who_left_stays_a_stranger(daemon, api, caplog):
+    daemon.handle_update(gmsg("noise"))
+    api.members[(GROUP, STRANGER)] = {"user": {"id": STRANGER}, "status": "left"}
     with caplog.at_level(logging.WARNING, logger="clipwrightd.poll"):
-        daemon.handle_update(msg("/start", uid=GUEST))       # ... and nobody in a DM
-        daemon.handle_update(msg(uid=GUEST, **video()))
-        daemon.handle_update(gif_cmd(uid=GUEST, chat=CHAT))
-        daemon.handle_update(cb("a/AAAAAA/grid", uid=GUEST, chat=CHAT))
-    assert len(api.calls) == served
+        daemon.handle_update(msg("/start", uid=STRANGER))
+        daemon.handle_update(msg(uid=STRANGER, **video()))
+    assert api.of("sendMessage") == [] and api.of("sendAnimation") == []
     assert sum("non-allowlisted" in r.getMessage() for r in caplog.records) == 1
+    assert len(api.of("getChatMember")) == 1              # same room set: no re-check
+
+
+def test_getchatmember_error_does_not_admit_or_crash(daemon, api, caplog):
+    daemon.handle_update(gmsg("noise"))
+    api.members[(GROUP, GUEST2)] = BotAPIError("getChatMember: user not found", 400)
+    with caplog.at_level(logging.WARNING, logger="clipwrightd.poll"):
+        daemon.handle_update(msg("/start", uid=GUEST2))
+        daemon.handle_update(msg("/help", uid=GUEST2))
+    assert api.of("sendMessage") == []
+    assert sum("non-allowlisted" in r.getMessage() for r in caplog.records) == 1
+    assert len(api.of("getChatMember")) == 1
+
+
+def test_a_member_of_an_ignored_group_is_still_a_stranger_in_a_dm(daemon, api, store, caplog):
+    daemon.config.group_ids = {GROUP}
+    other = -100999
+    daemon.handle_update(msg("hi", uid=GUEST, chat=other))
+    assert not store.is_member(GUEST) and store.list_groups() == []
+    with caplog.at_level(logging.WARNING, logger="clipwrightd.poll"):
+        daemon.handle_update(msg("/start", uid=GUEST))
+    assert api.of("sendMessage") == []
+    assert sum("non-allowlisted" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_pinned_groups_let_a_lurker_dm_without_anyone_speaking(cfg, api, store, cook, probe, fetch):
+    cfg = replace(cfg, group_ids={GROUP})
+    daemon = Daemon(cfg, api, store, RenderQueue(depth=cfg.queue_depth, inline=True), COOKBOOK,
+                    cook_fn=cook, probe_fn=probe, fetch_fn=fetch)
+    assert store.list_groups() == [GROUP]
+    api.members[(GROUP, GUEST)] = {"user": {"id": GUEST}, "status": "administrator"}
+    daemon.handle_update(msg("/start", uid=GUEST))
+    assert "Hi!" in api.texts()[-1]
+    assert api.of("getChatMember") == [{"chat_id": GROUP, "user_id": GUEST}]
 
 
 def charged(store: Store, uid: int) -> int:

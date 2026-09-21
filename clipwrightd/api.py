@@ -257,6 +257,10 @@ class BotAPI:
         """The bot's own User object (``username`` lets a group's ``/cmd@name`` be told ours from another bot's)."""
         return self.call("getMe")
 
+    def get_chat_member(self, chat_id: int, user_id: int) -> dict:
+        """``getChatMember``: a ChatMember dict (``status`` plus ``user``), or raises ``BotAPIError``."""
+        return self.call("getChatMember", chat_id=chat_id, user_id=user_id)
+
     def get_file(self, file_id: str) -> dict:
         return self.call("getFile", file_id=file_id)
 

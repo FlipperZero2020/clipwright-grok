@@ -159,6 +159,7 @@ def test_custom_base_url() -> None:
     (lambda b: b.set_my_commands([{"command": "start", "description": "Begin"}]), "setMyCommands",
      {"commands": [{"command": "start", "description": "Begin"}]}),
     (lambda b: b.get_file("fid"), "getFile", {"file_id": "fid"}),
+    (lambda b: b.get_chat_member(-100, 7), "getChatMember", {"chat_id": -100, "user_id": 7}),
 ])
 def test_simple_methods(invoke, method, body) -> None:
     rec = Recorder(ok({"file_id": "fid", "file_path": "videos/file_1.mp4"}))

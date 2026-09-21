@@ -1,6 +1,6 @@
 """clipwrightd.session — the daemon's memory, in one SQLite file.
 
-Three tables, one ``Store`` per daemon:
+Five tables, one ``Store`` per daemon:
 
 - ``sessions``: a 6-char token -> the live recipe instance, its undo stack,
   the Telegram message the preview lives in and, for a session opened in a
@@ -12,6 +12,10 @@ Three tables, one ``Store`` per daemon:
   the user who exported it. This is what lets ``/remix`` on any old GIF
   reopen its knobs — for its owner; the recipe names their private upload.
 - ``quota``: (user_id, UTC day) -> renders today.
+- ``room_members``: user ids seen in a served group (or verified with
+  ``getChatMember``). They may DM the bot the same way friends do.
+- ``known_groups``: chat ids of served groups the daemon has learned, so a
+  lurker who DMs can be checked against rooms the bot is in.
 
 Sessions are the only rows that age out: ``expire_sessions`` drops the ones
 idle past a cutoff so the daemon can reclaim their render directories, and
@@ -72,6 +76,14 @@ CREATE TABLE IF NOT EXISTS quota (
     count   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day)
 );
+CREATE TABLE IF NOT EXISTS room_members (
+    user_id INTEGER PRIMARY KEY,
+    seen_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS known_groups (
+    chat_id INTEGER PRIMARY KEY,
+    seen_at REAL NOT NULL
+);
 """
 
 # Columns added after the first release, applied to an older file on open.
@@ -124,7 +136,7 @@ def utc_day(now: float | None = None) -> str:
 
 
 class Store:
-    """SQLite-backed sessions, undo, file ledger and daily quota."""
+    """SQLite-backed sessions, undo, file ledger, daily quota and room trust."""
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -324,6 +336,42 @@ class Store:
                 "SELECT count FROM quota WHERE user_id = ? AND day = ?", (user_id, bucket)
             ).fetchone()["count"]
         return count > per_day
+
+    # -- room trust ---------------------------------------------------------
+
+    def note_member(self, user_id: int) -> None:
+        """Remember a person seen (or verified) in a served group. Idempotent."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO room_members (user_id, seen_at) VALUES (?, ?)"
+                " ON CONFLICT(user_id) DO UPDATE SET seen_at = excluded.seen_at",
+                (user_id, time.time()),
+            )
+
+    def is_member(self, user_id: int) -> bool:
+        """True when ``user_id`` has been noted as a room member."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM room_members WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return row is not None
+
+    def note_group(self, chat_id: int) -> None:
+        """Remember a served group chat id. Idempotent."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO known_groups (chat_id, seen_at) VALUES (?, ?)"
+                " ON CONFLICT(chat_id) DO UPDATE SET seen_at = excluded.seen_at",
+                (chat_id, time.time()),
+            )
+
+    def list_groups(self) -> list[int]:
+        """Every served group chat id the daemon has learned, stable order."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT chat_id FROM known_groups ORDER BY chat_id"
+            ).fetchall()
+        return [row["chat_id"] for row in rows]
 
 
 def _session_from_row(row: sqlite3.Row) -> Session:

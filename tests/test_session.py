@@ -34,7 +34,7 @@ def test_open_creates_parent_dir_schema_and_wal(tmp_path):
     store.close()
     conn = sqlite3.connect(path)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"sessions", "ledger", "quota"} <= tables
+    assert {"sessions", "ledger", "quota", "room_members", "known_groups"} <= tables
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     pk = [r[1] for r in conn.execute("PRAGMA table_info(quota)") if r[5]]
     assert pk == ["user_id", "day"]
@@ -253,6 +253,23 @@ def test_sessions_gain_the_origin_column_on_an_older_file(tmp_path):
     reopened = Store(path)                        # the migration is idempotent
     assert reopened.get(fresh).origin_message_id == 77
     reopened.close()
+
+
+# -- room trust -------------------------------------------------------------
+
+def test_room_members_and_groups_persist(tmp_path):
+    path = str(tmp_path / "state.db")
+    first = Store(path)
+    first.note_member(42)
+    first.note_member(42)                         # idempotent
+    first.note_group(-100)
+    first.note_group(-50)
+    assert first.is_member(42) and not first.is_member(7)
+    assert first.list_groups() == [-100, -50]
+    first.close()
+    second = Store(path)
+    assert second.is_member(42) and second.list_groups() == [-100, -50]
+    second.close()
 
 
 # -- quota ------------------------------------------------------------------

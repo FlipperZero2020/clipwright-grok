@@ -192,7 +192,8 @@ daemon warns loudly on any other mode:
 CLIPWRIGHT_BOT_TOKEN=123456789:AA...
 # your Telegram user id
 CLIPWRIGHT_OWNER_ID=111111111
-# optional comma list; everyone else gets silence in a DM (in a group, the guest quota below)
+# optional extra DM allowlist (group members are remembered automatically;
+# everyone else still gets silence in a DM)
 CLIPWRIGHT_FRIEND_IDS=222222222,333333333
 # optional comma list of group chat ids (negative); set, the bot works only in those groups
 # and ignores any other it is added to; unset, it works in every group it is in. Either way,
@@ -254,6 +255,9 @@ pidfile lock in the state dir because a second poller on the same token makes up
   ignored without a word, other bots' commands are left alone unless addressed `@<bot>`,
   and everything the bot sends there is a reply to the message that asked. **Everyone in
   the room is trusted** (the owner put the bot there on purpose) — no guest-quota friction.
+  Chatter is not a job, but it does remember the sender: **once the bot has seen you
+  in a group, you can DM it** the same way friends do (photo or video, no `/gif` needed).
+  A lurker who never spoke is checked with `getChatMember` against groups the bot knows.
 - Buttons and text prompts belong to the user who opened the session: another member's press
   gets a "someone else's session" toast, and only the owner's reply *to the prompt* is taken
   as the answer — ordinary chatter from them is left alone even when the bot's privacy mode
@@ -261,7 +265,8 @@ pidfile lock in the state dir because a second poller on the same token makes up
 - Anonymous admins, members posting as a channel and Telegram's service accounts all share one
   sender id, so they are not served: `/gif` from them gets a one-line "send it as yourself",
   everything else is ignored.
-- `/start`, `/help`, `/recipes`; DM allowlist (owner + friends); groups open to every member
+- `/start`, `/help`, `/recipes`; DM allowlist (owner + friends + anyone seen in a served group);
+  groups open to every member
   (every group the bot is in, or only those in `CLIPWRIGHT_GROUP_IDS`); per-user concurrency
   of 1, a queue depth cap, and a per-day export quota.
 
