@@ -251,7 +251,7 @@ pidfile lock in the state dir because a second poller on the same token makes up
   `.recipe.toml` sidecar; the sent file's `file_unique_id` is ledgered.
 - Reply `/remix` to a GIF the bot sent you and the session reopens with its knobs live (your
   own exports, or any export if you are the owner).
-- In a group, only `/gif` (and the other commands) start work: bare videos and chatter are
+- In a group **or channel** (Test2 the same as weir and bencho), only `/gif` (and the other commands) start work: bare videos and chatter are
   ignored without a word, other bots' commands are left alone unless addressed `@<bot>`,
   and everything the bot sends there is a reply to the message that asked. **Everyone in
   the room is trusted** (the owner put the bot there on purpose) — no guest-quota friction.
@@ -266,7 +266,7 @@ pidfile lock in the state dir because a second poller on the same token makes up
   sender id, so they are not served: `/gif` from them gets a one-line "send it as yourself",
   everything else is ignored.
 - `/start`, `/help`, `/recipes`; DM allowlist (owner + friends + anyone seen in a served group);
-  groups open to every member
+  groups **and channels** open to every member
   (every group the bot is in, or only those in `CLIPWRIGHT_GROUP_IDS`); per-user concurrency
   of 1, a queue depth cap, and a per-day export quota.
 

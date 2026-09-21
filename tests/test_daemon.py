@@ -50,6 +50,7 @@ GUEST = 4243          # a group member off the allowlist
 GUEST2 = 4244
 CHAT = 555
 GROUP = -100777       # a supergroup the bot is in
+CHANNEL = -100200     # a broadcast channel (Test2-style); members are trusted like weir/bencho
 BOT_NAME = "clipwright_bot"             # as the daemon keeps it: lowercased from getMe's "Clipwright_Bot"
 CAP = 1_000_000
 COOKBOOK = recipe.load_cookbook()
@@ -282,6 +283,28 @@ def gif_cmd(uid: int = GUEST, chat: int = GROUP, text: str = "/gif", **kw: objec
     return msg(text, uid=uid, chat=chat, reply_to_message={"message_id": next(_ids), **video(**kw)})
 
 
+def _channel_chat(chat: int = CHANNEL, title: str = "Test2") -> dict:
+    return {"id": chat, "type": "channel", "title": title}
+
+
+def channel_post(text: str | None = None, uid: int | None = GUEST, chat: int = CHANNEL,
+                 **extra: object) -> dict:
+    """A signed ``channel_post`` (Test2 / weir / bencho style). ``uid is None`` is unsigned."""
+    m: dict = {"message_id": next(_ids), "chat": _channel_chat(chat), "date": 0,
+               "sender_chat": _channel_chat(chat)}
+    if uid is not None:
+        m["from"] = _from(uid)
+    if text is not None:
+        m["text"] = text
+    m.update(extra)
+    return {"update_id": next(_ids), "channel_post": m}
+
+
+def channel_gif(uid: int | None = GUEST, chat: int = CHANNEL, text: str = "/gif", **kw: object) -> dict:
+    """``/gif`` as a channel_post, optionally in reply to a video."""
+    return channel_post(text, uid=uid, chat=chat, reply_to_message={"message_id": next(_ids), **video(**kw)})
+
+
 def cb(data: str, uid: int = OWNER, chat: int = CHAT, message_id: int = 101) -> dict:
     return {"update_id": next(_ids), "callback_query": {
         "id": f"cq{next(_ids)}", "from": _from(uid), "data": data,
@@ -493,9 +516,7 @@ def test_group_ignores_everything_that_is_not_a_command(daemon, api):
     daemon.handle_update(gmsg("just some words", uid=OWNER))
     daemon.handle_update(gmsg(sticker={"file_id": "s"}))
     daemon.handle_update(gmsg(new_chat_members=[_from(GUEST2)]))
-    channel = msg("/start")
-    channel["message"]["chat"] = {"id": -200, "type": "channel"}
-    daemon.handle_update(channel)
+    daemon.handle_update(channel_post("just some words"))     # channel chatter is not a job either
     assert api.calls == []
 
 
@@ -528,6 +549,39 @@ def test_joiners_are_remembered_without_speaking(daemon, api, store):
     assert store.is_member(GUEST2) and store.is_member(OWNER)
     daemon.handle_update(msg("/start", uid=GUEST2))
     assert "Hi!" in api.texts()[-1]
+
+
+def test_a_signed_channel_gif_is_served_like_a_group(daemon, api, store, cook):
+    """Test2-style channels are rooms: signed /gif gets a preview and trusts the member."""
+    update = channel_gif()
+    daemon.handle_update(update)
+    (sent,) = api.of("sendAnimation")
+    assert sent["chat_id"] == CHANNEL and sent["reply_to_message_id"] == update["channel_post"]["message_id"]
+    token = token_of(sent["reply_markup"])
+    sess = store.get(token)
+    assert (sess.user_id, sess.chat_id, sess.origin_message_id) == (GUEST, CHANNEL, update["channel_post"]["message_id"])
+    assert store.is_member(GUEST) and store.list_groups() == [CHANNEL]
+    daemon.handle_update(msg("/start", uid=GUEST))            # later DM works
+    assert "Hi!" in api.texts()[-1]
+
+
+def test_bare_gif_in_a_channel_still_answers(daemon, api, store, fetch):
+    daemon.handle_update(channel_post("/gif"))
+    assert api.of("sendAnimation")
+    assert api.of("sendAnimation")[-1]["chat_id"] == CHANNEL
+    assert store.get(token_of(api.of("sendAnimation")[-1]["reply_markup"])).recipe["recipe"] == "typecard"
+
+
+def test_unsigned_channel_gif_gets_the_anon_hint(daemon, api, store, cook):
+    asked = channel_gif(uid=None)
+    daemon.handle_update(asked)
+    assert api.texts() == [ANON_HINT]
+    assert api.of("sendMessage")[-1]["reply_to_message_id"] == asked["channel_post"]["message_id"]
+    assert api.of("getFile") == [] and cook.calls == [] and store.session_tokens() == set()
+
+
+def test_poll_asks_telegram_for_channel_posts():
+    assert "channel_post" in poll_mod.ALLOWED_UPDATES
 
 
 def test_lurker_is_admitted_when_getchatmember_says_they_are_in_the_room(daemon, api, store):

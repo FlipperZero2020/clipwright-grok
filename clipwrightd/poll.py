@@ -26,21 +26,22 @@ room): once they are in the chat, they can DM the bot the same way
 friends do — photo or video without ``/gif``, full foundry. A true
 stranger who has never been in a room still gets silence.
 
-Groups are served too. A group is a room, not an inbox: only explicit
-commands are acted on, and ``/gif`` is the way in — reply to a photo,
-video or sentence, or ``/gif <words>``, or a bare ``/gif`` for a tiny
+Groups and channels are served the same way. A room is not an inbox: only
+explicit commands are acted on, and ``/gif`` is the way in — reply to a
+photo, video or sentence, or ``/gif <words>``, or a bare ``/gif`` for a tiny
 self-aware typecard. Bare videos, chatter, stickers and joins are ignored
 without a word (other bots own the commands we do not know, unless one is
 addressed ``@us``), but chatter still *remembers* the sender so their DMs
-work later. Everyone in a group the bot is in is trusted (the owner put
-it there on purpose). Everything the bot sends in a group is a reply — to the ``/gif``
+work later. Everyone in a group or channel the bot is in is trusted (the
+owner put it there on purpose — Test2 the same as weir and bencho). Everything the bot sends in a room is a reply — to the ``/gif``
 that opened the session (kept as ``origin_message_id``) or to the message
 that asked. Buttons and text prompts belong to the user who opened the
-session. Senders that are not one person — anonymous admins, members
-posting as a channel, Telegram's own service accounts — share one id and
+session. Senders that are not one person — anonymous admins, unsigned
+channel posts, members posting as a channel, Telegram's own service
+accounts — share one id and
 are not served: ``/gif`` from them gets ``ANON_HINT``, the rest is
-dropped. ``CLIPWRIGHT_GROUP_IDS``, when set, names the only groups the
-bot works in; unset, any group it is added to.
+dropped. ``CLIPWRIGHT_GROUP_IDS``, when set, names the only rooms the
+bot works in; unset, any group or channel it is added to.
 
 Three rules keep what the user sees true:
 
@@ -102,7 +103,7 @@ BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 60.0
 HEARTBEAT_S = 4.0            # Telegram shows a chat action for ~5 s; keep it alive while a cook runs
 SWEEP_INTERVAL_S = 3600.0
-ALLOWED_UPDATES = ["message", "callback_query"]
+ALLOWED_UPDATES = ["message", "callback_query", "channel_post"]
 PIDFILE = "daemon.pid"
 OFFSET_FILE = "offset"
 LOG_FILE = "daemon.log"
@@ -259,23 +260,30 @@ def _command_of(text: str) -> tuple[str, str | None] | None:
 
 
 def _chat_kind(chat: dict | None) -> str | None:
-    """``"dm"`` for a private chat, ``"group"`` for a group or supergroup, None for anything else (a channel)."""
+    """``"dm"`` for a private chat, ``"group"`` for a group, supergroup or channel, None otherwise."""
     kind = (chat or {}).get("type")
     if kind == "private":
         return "dm"
-    if kind in ("group", "supergroup"):
+    if kind in ("group", "supergroup", "channel"):
         return "group"
     return None
 
 
 def _impersonal(msg: dict) -> bool:
-    """True when the sender is not one person: an anonymous admin, a channel, a bot or a service account.
+    """True when the sender is not one person: an anonymous admin, an unsigned
+    channel post, a bot or a service account.
 
-    Such senders share one ``from.id``, so serving them would pool their
-    quota, their disk budget and their session ownership.
+    Such senders share one ``from.id`` (or have none), so serving them would
+    pool their quota, their disk budget and their session ownership. A
+    **signed** channel post still has a real ``from``; Telegram always sets
+    ``sender_chat`` to the channel, and that alone is not impersonal.
     """
     sender = msg.get("from") or {}
-    return bool(msg.get("sender_chat")) or bool(sender.get("is_bot")) or sender.get("id") in TELEGRAM_SERVICE_IDS
+    if bool(sender.get("is_bot")) or sender.get("id") in TELEGRAM_SERVICE_IDS:
+        return True
+    if (msg.get("chat") or {}).get("type") == "channel":
+        return not isinstance(sender.get("id"), int)
+    return bool(msg.get("sender_chat"))
 
 
 def _from_us(msg: dict, username: str | None) -> bool:
@@ -545,6 +553,8 @@ class Daemon:
                 self._handle_callback(update["callback_query"])
             elif isinstance(update.get("message"), dict):
                 self._handle_message(update["message"])
+            elif isinstance(update.get("channel_post"), dict):
+                self._handle_message(update["channel_post"])
         except Exception:
             log.exception("update %s failed", update.get("update_id"))
             where = self._chat_of(update)
@@ -746,7 +756,8 @@ class Daemon:
     @staticmethod
     def _chat_of(update: dict) -> tuple[int, int | None] | None:
         """``(chat_id, origin)`` of an update: ``origin`` is the message to reply to in a group, None in a DM."""
-        msg = update.get("message") or (update.get("callback_query") or {}).get("message") or {}
+        msg = (update.get("message") or update.get("channel_post")
+               or (update.get("callback_query") or {}).get("message") or {})
         chat_id = (msg.get("chat") or {}).get("id")
         if chat_id is None:
             return None
