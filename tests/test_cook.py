@@ -562,3 +562,38 @@ def test_plan_loop_static_modes():
     assert short.reverse is False and short.score is None and short.label.startswith("seamless")
     with pytest.raises(RecipeError, match="loop"):
         common.plan_loop("wobble", "x", seg, log=[])
+
+
+@pytest.fixture
+def test_still(tmp_path):
+    path = str(tmp_path / "still.jpg")
+    Image.new("RGB", (320, 200), (40, 90, 140)).save(path, format="JPEG")
+    return path
+
+
+def test_cook_ken_burns_photo_proxy(book, test_still, tmp_out):
+    inst = recipe.defaults(book["ken-burns"])
+    inst["input"] = test_still
+    recipe.set_(inst, "caption.text", "dog")
+    result = cook(inst, out_dir=tmp_out, proxy=True, cookbook=book)
+    assert result.mp4 and os.path.isfile(result.mp4)
+    assert result.gif is None
+    assert result.report["loop"] == "none"
+    assert result.report["duration"] == pytest.approx(3.0, abs=0.2)
+    assert "ken-burns" in result.report["cli"] and "dog" in result.report["cli"]
+
+
+def test_cook_gifify_accepts_a_still(book, test_still, tmp_out):
+    inst = _inst(book, "gifify", test_still, loop="none")
+    result = cook(inst, out_dir=tmp_out, proxy=True, cookbook=book)
+    assert result.mp4 and os.path.isfile(result.mp4)
+    assert result.report["duration"] == pytest.approx(common.STILL_HOLD_S, abs=0.2)
+
+
+def test_cook_typecard_needs_no_input(book, tmp_out):
+    inst = recipe.defaults(book["typecard"])
+    recipe.set_(inst, "caption.text", "hello void")
+    result = cook(inst, out_dir=tmp_out, proxy=True, cookbook=book)
+    assert result.mp4 and os.path.isfile(result.mp4)
+    assert "input" not in (recipe.load_instance(result.report["sidecar"]))
+    assert result.report["cli"] == "clipwright cook typecard --set 'caption.text=hello void'"

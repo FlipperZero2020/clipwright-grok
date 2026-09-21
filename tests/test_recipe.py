@@ -9,7 +9,13 @@ import pytest
 from clipwright import budget, recipe
 from clipwright.recipe import Knob, RecipeDef, RecipeError
 
-EXPECTED = {"gifify": "gifify", "caption-loop": "caption_loop", "boomerang": "boomerang"}
+EXPECTED = {
+    "gifify": ("gifify", True),
+    "caption-loop": ("caption_loop", True),
+    "boomerang": ("boomerang", True),
+    "ken-burns": ("ken_burns", True),
+    "typecard": ("typecard", False),
+}
 
 
 @pytest.fixture(scope="module")
@@ -33,11 +39,10 @@ def knob_index(defn, key):
 
 # ---------------------------------------------------------------- cookbook
 
-def test_cookbook_loads_all_three_defs(book):
-    assert {n: d.pipeline for n, d in book.items()} == EXPECTED
+def test_cookbook_loads_all_shipped_defs(book):
+    assert {n: (d.pipeline, d.needs_input) for n, d in book.items()} == EXPECTED
     for name, defn in book.items():
         assert defn.name == name
-        assert defn.needs_input is True
         assert defn.blurb and defn.emoji
         assert defn.knobs
 

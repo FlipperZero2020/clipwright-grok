@@ -58,16 +58,18 @@ def _one_error_line(capsys) -> str:
 
 # --- recipes / probe -----------------------------------------------------------
 
-def test_recipes_lists_three_with_knobs(capsys):
+def test_recipes_lists_five_with_knobs(capsys):
     assert main(["recipes"]) == 0
     out = capsys.readouterr().out
     heads = [line for line in _lines(out) if not line.startswith(" ")]
-    assert len(heads) == 3
-    assert [h.split()[1] for h in heads] == ["boomerang", "caption-loop", "gifify"]
+    assert len(heads) == 5
+    assert [h.split()[1] for h in heads] == ["boomerang", "caption-loop", "gifify", "ken-burns", "typecard"]
     assert all(" — " in h for h in heads)
     knobs = [line for line in _lines(out) if line.startswith("    ")]
     assert any(line.split()[0] == "caption.text" for line in knobs)
     assert any("seamless | boomerang | crossfade | none" in line for line in knobs)
+    assert any(line.split()[0] == "zoom" for line in knobs)
+    assert any("needs_input" not in line for line in heads)
 
 
 def test_probe_prints_the_clip_fields(test_clip, capsys):
@@ -136,6 +138,13 @@ def test_cook_unknown_recipe_lists_cookbook_and_exits_2(test_clip, tmp_out, caps
     assert "unknown recipe 'sparkle'" in err
     assert "gifify" in err and "caption-loop" in err and "boomerang" in err
     assert not os.listdir(tmp_out)
+
+
+def test_cook_typecard_needs_no_input(tmp_out, capsys):
+    assert main(["cook", "typecard", "--text", "hi", "--proxy", "--out", tmp_out]) == 0
+    out = capsys.readouterr().out
+    assert "typecard" in out and "Re-run anytime:" in out
+    assert any(n.endswith(".mp4") for n in os.listdir(tmp_out))
 
 
 def test_caption_flag_on_captionless_recipe_exits_2(test_clip, tmp_out, capsys):
@@ -396,7 +405,7 @@ def test_doctor_required_checks_pass_here(capsys):
     by_name = {c.name: c for c in checks}
     assert by_name["libass"].required is False
     assert by_name["emoji font"].required is False and by_name["bot.env"].required is False
-    assert by_name["cookbook"].detail.startswith("3 recipes:")
+    assert by_name["cookbook"].detail.startswith("5 recipes:")
     assert by_name["ffmpeg"].detail[0].isdigit() and by_name["gifsicle"].detail[0].isdigit()
     font = by_name["caption font"]
     assert os.path.isfile(font.detail.split(" (")[0])

@@ -8,8 +8,10 @@ Two things live in this repo:
    gifify, caption-loop and boomerang pipelines, two-pass palette GIFs, the Pillow caption
    card, `clipwright doctor`), and so are the keyboard, session, Bot API and daemon parts of
    Milestone 2 (the button loop, in-place preview swapping, export with sidecar, `/remix`).
-   Not built yet: the `[🎲 Grid]` contact sheet, the crossfade loop, and the generative
-   recipes. [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md) is the binding module
+   Not built yet: the `[🎲 Grid]` contact sheet, the crossfade loop, and the remaining
+   generative recipes (emoji physics, gradient loops). `typecard` (kinetic caption
+   card, `needs_input = false`) and `ken-burns` (zoom-pan over a still) shipped with
+   the `/gif` seed front door. [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md) is the binding module
    contract; the plan is the intent. ([CLIPWRIGHT_PLAN_v1_claude-code-skill.md](CLIPWRIGHT_PLAN_v1_claude-code-skill.md)
    is the superseded v1.)
 2. **A working render pipeline that already ships GIFs** — the gag-GIF series about a real
@@ -54,7 +56,7 @@ file is ever printed). The state dir is resolved exactly the way `clipwrightd` r
 ✓ emoji font       /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf  (optional)
 ✓ state dir        /home/tom/.clipwright will be created
 ✗ bot.env          /home/tom/.clipwright/bot.env absent (the daemon needs it; the CLI does not)  (optional)
-✓ cookbook         3 recipes: boomerang, caption-loop, gifify
+✓ cookbook         5 recipes: boomerang, caption-loop, gifify, ken-burns, typecard
 all required checks passed
 ```
 
@@ -67,8 +69,11 @@ clipwright cook gifify clip.mp4
 # trim, loop, and burn an Impact-style caption (a palette colour: bare hex or #rrggbb, any case)
 clipwright cook caption-loop clip.mp4 --text "my sprint velocity" --color ffdd00 --from 0:02.0 --to 0:04.5
 
-# forward, then backward, forever
-clipwright cook boomerang clip.mp4 --from 0:00.5 --to 2
+# a still: Ken Burns zoom, optional caption
+clipwright cook ken-burns photo.jpg --text "dog"
+
+# words alone — no input file (kinetic caption card)
+clipwright cook typecard --text "MISSING ARGUMENT"
 ```
 
 Outputs land in `./clips/` (`--out DIR` to change) under a stem the engine chooses —
@@ -120,6 +125,16 @@ bare `rrggbb` in either case. `--fits` takes a preset (`telegram`, `discord`, `s
     loop           enum   seamless | boomerang | crossfade | none  (default "seamless")
     fits           enum   telegram | discord | slack  (default "telegram")
     trim           range  nudges --from/--to by 0.1 s
+📷 ken-burns — Ken Burns a still: slow zoom, optional caption.
+    caption.text   text   up to 60 chars  (default "")
+    zoom           enum   1.2 | 1.4 | 1.6 | 1.9  (default 1.4)
+    duration       step   2..6 by 1  (default 3)
+    …
+🃏 typecard — A kinetic caption card from words alone.
+    caption.text   text   up to 80 chars  (default "")
+    bg             enum   #121220 | …  (default "#121220")
+    duration       step   2..6 by 1  (default 3)
+    …
 ```
 
 `loop = "seamless"` runs the perfect-loop finder (frame-similarity scan that nudges the
@@ -163,8 +178,9 @@ clip), or an ffmpeg or gifsicle failure — never a traceback.
 ## Telegram daemon
 
 `clipwrightd` is a client of the engine — the same `cook`, driven by buttons. It is stdlib
-only (`urllib` against `api.telegram.org`, `sqlite3` for state, one worker thread for
-renders) and its only network traffic is the Bot API.
+only (`urllib` against `api.telegram.org` and, for `/gif <words>`, Wikimedia Commons;
+`sqlite3` for state, one worker thread for renders). Offline still works when the user
+already supplied media or when the local typecard fallback can run.
 
 ### Configure
 
@@ -194,8 +210,8 @@ CLIPWRIGHT_MAX_DIM=1920
 # exports per user per day, and render jobs queued at once
 CLIPWRIGHT_PER_DAY_QUOTA=200
 CLIPWRIGHT_QUEUE_DEPTH=8
-# renders per day for a group member who is neither owner nor friend (every preview,
-# button press and export is one); 0 turns group rendering off
+# renders per day for a group member who is neither owner nor friend (legacy;
+# groups no longer use this as a gate — everyone in the room is trusted)
 CLIPWRIGHT_GUEST_PER_DAY_QUOTA=10
 # uploads + renders kept on disk per user, and how many days an idle session lives
 CLIPWRIGHT_MAX_USER_BYTES=1000000000
@@ -219,10 +235,14 @@ pidfile lock in the state dir because a second poller on the same token makes up
 
 ### What works today
 
-- Send a video (or animation, or a `video/*` document) → it is size-gated (≤ 20 MB, Telegram's
-  own `getFile` cap), downloaded, probed (≤ 60 s, ≤ 1920 px), and answered with a proxy MP4
-  preview of the `gifify` recipe plus an inline keyboard of its knobs; the keyboard's top row
-  switches to `caption-loop` or `boomerang` without re-uploading.
+- `/gif` is the front door. It obtains a **seed**, then opens the same recipe / knob /
+  preview / export foundry:
+  - Reply to a **photo** (or image document) → Ken Burns preview you can tune.
+  - Reply to a **video** / animation → gifify preview (same as before).
+  - Reply to a **text** message, or `/gif dog` → Wikimedia Commons still (then Ken Burns),
+    or a local typecard if the fetch fails.
+  - Bare `/gif` → a self-aware "missing argument" typecard; it does not crash or stay silent.
+- Send a photo or video in a DM (no `/gif` needed) and get the same keyboard.
 - Every button press edits the recipe by one field and re-renders the preview **in place**
   (`editMessageMedia`); `↩ Undo` pops the session's undo stack; `✎` buttons ask for text
   with a force-reply prompt; `⌘ Show CLI` prints the reproducing command.
@@ -230,18 +250,10 @@ pidfile lock in the state dir because a second poller on the same token makes up
   `.recipe.toml` sidecar; the sent file's `file_unique_id` is ledgered.
 - Reply `/remix` to a GIF the bot sent you and the session reopens with its knobs live (your
   own exports, or any export if you are the owner).
-- In a group, reply `/gif` (or `/gif@<bot>`) to a video and the preview lands as a reply to
-  that message, with the same keyboard. A group is a room, not an inbox: bare videos and
-  chatter are ignored without a word, other bots' commands are left alone unless addressed
-  `@<bot>`, and everything the bot sends there is a reply to the message that asked (so it
-  stays in the right forum topic — and it is still sent if that message has since been
-  deleted). `/gif` without a reply gets a one-line hint.
-- Group members off the allowlist are guests: every render they trigger (the `/gif` preview,
-  each button press, recipe switch, undo, text knob, export and `/remix`) counts against
-  `CLIPWRIGHT_GUEST_PER_DAY_QUOTA`, checked before a byte is downloaded; `0` turns group
-  rendering off. Owner and friends keep paying the export quota only. A guest hears each
-  hint or refusal at most once a minute, so a loop of `/gif` cannot spend the group's send
-  allowance for everyone else.
+- In a group, only `/gif` (and the other commands) start work: bare videos and chatter are
+  ignored without a word, other bots' commands are left alone unless addressed `@<bot>`,
+  and everything the bot sends there is a reply to the message that asked. **Everyone in
+  the room is trusted** (the owner put the bot there on purpose) — no guest-quota friction.
 - Buttons and text prompts belong to the user who opened the session: another member's press
   gets a "someone else's session" toast, and only the owner's reply *to the prompt* is taken
   as the answer — ordinary chatter from them is left alone even when the bot's privacy mode
@@ -249,17 +261,17 @@ pidfile lock in the state dir because a second poller on the same token makes up
 - Anonymous admins, members posting as a channel and Telegram's service accounts all share one
   sender id, so they are not served: `/gif` from them gets a one-line "send it as yourself",
   everything else is ignored.
-- `/start`, `/help`, `/recipes`; DM allowlist (owner + friends); groups open to members under
-  the guest quota (every group the bot is in, or only those in `CLIPWRIGHT_GROUP_IDS`);
-  per-user concurrency of 1, a queue depth cap, and a per-day export quota.
+- `/start`, `/help`, `/recipes`; DM allowlist (owner + friends); groups open to every member
+  (every group the bot is in, or only those in `CLIPWRIGHT_GROUP_IDS`); per-user concurrency
+  of 1, a queue depth cap, and a per-day export quota.
 
 ### What does not, yet
 
 - **Grid** — the `[🎲 Grid]` button answers with a toast; 3×3 contact sheets and single-gene
   mutation are not built.
 - **Crossfade loops** — render straight, labelled as such.
-- **Generative recipes** (kinetic typography, gradient loops, emoji physics) — the cookbook
-  has only the three clip recipes; `needs_input = false` is wired but nothing uses it.
+- **More generative recipes** (emoji physics, gradient loops) — `typecard` is the first
+  `needs_input = false` recipe; the rest are still unbuilt.
 - **Local Bot API server** — the 20 MB inbound cap stands; oversize uploads get a "trim it
   and resend" reply rather than a download.
 
@@ -271,14 +283,15 @@ clipwright/              the engine — pure, importable, knows nothing about Te
   doctor.py              toolchain, font, state-dir and bot.env preflight (`--home`)
   cook.py                instance -> validated pipeline run -> outputs + sidecar
   recipe.py              cookbook loader, TOML writer, dotted knobs, validation, apply_knob
-  pipelines/             gifify, caption_loop, boomerang (+ common plumbing)
+  pipelines/             gifify, caption_loop, boomerang, ken_burns, typecard
   ffmpeg.py              argv builders and the only subprocess wrapper for media binaries
   caption.py             Pillow caption band (the only place user text becomes pixels)
   budget.py              size presets, encode ladder, best-first solver, gifsicle squeeze
   loopfind.py            frame-similarity perfect-loop finder
-  cookbook/*.toml        recipe definitions
+  cookbook/*.toml        recipe definitions (gifify, caption-loop, boomerang, ken-burns, typecard)
 clipwrightd/             the bot — a client of the engine
   poll.py                getUpdates loop, pidfile lock, offset persistence, every handler
+  fetch.py               Wikimedia Commons still search for /gif <words> (injectable; mocked in tests)
   keyboards.py           knob spec -> inline keyboard, 64-byte callback encoding
   session.py             SQLite: sessions, undo stack, file ledger, quotas
   queue.py               one render worker, per-user concurrency 1
@@ -357,8 +370,8 @@ python3 -m pytest -q
 
 Runs everything — the engine (`tests/test_cli.py`, `test_cook.py`, `test_recipe.py`,
 `test_ffmpeg.py`, `test_caption.py`, `test_budget.py`, `test_loopfind.py`), the daemon
-(`test_daemon.py`, `test_api.py`, `test_keyboards.py`, `test_session.py`, all against a fake
-transport that never opens a socket), the series kits (`test_kits.py`,
+(`test_daemon.py`, `test_api.py`, `test_keyboards.py`, `test_session.py`, `test_fetch.py`,
+all against a fake transport that never opens a socket), the series kits (`test_kits.py`,
 `test_style_common.py`) and the ledger (`test_series_state.py`). The engine tests render a
 synthetic 3 s clip made with `ffmpeg -f lavfi testsrc2`, so they need ffmpeg and gifsicle
 but no network; the whole suite finishes in well under a minute.

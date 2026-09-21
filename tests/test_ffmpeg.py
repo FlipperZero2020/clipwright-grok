@@ -103,6 +103,35 @@ def test_probe_fixture(test_clip):
     assert p.vcodec == "h264"
     assert p.has_audio is True
     assert p.size_bytes == os.path.getsize(test_clip)
+    assert p.still is False
+
+
+def test_probe_accepts_jpeg_png_webp_as_stills(tmp_path):
+    from PIL import Image
+    for name, fmt in (("a.jpg", "JPEG"), ("a.png", "PNG"), ("a.webp", "WEBP")):
+        path = str(tmp_path / name)
+        Image.new("RGB", (320, 200), (20, 80, 160)).save(path, format=fmt)
+        p = F.probe(path)
+        assert p.still is True and F.is_still(p)
+        assert (p.width, p.height) == (320, 200)
+        assert p.duration == 0.0 and p.nb_frames == 1
+        assert p.has_audio is False
+
+
+def test_kenburns_argv_is_numbers_and_fixed_tokens_only():
+    argv = F.kenburns_argv("/tmp/x.jpg", "/tmp/y.mp4", width=480, height=300, fps=12, duration_s=3, zoom=1.4)
+    assert argv[0] == "ffmpeg" and "-loop" in argv and argv[argv.index("-i") + 1] == "/tmp/x.jpg"
+    vf = argv[argv.index("-vf") + 1]
+    assert "zoompan" in vf and "x.jpg" not in vf
+    assert "'" in vf  # the z expression is a quoted numeric template
+
+
+def test_still_hold_and_image_seq_argv_shape():
+    hold = F.still_hold_argv("in.jpg", "out.mp4", width=320, fps=12, duration_s=3)
+    assert hold[:3] == ["ffmpeg", "-hide_banner", "-loglevel"] and "-loop" in hold
+    seq = F.image_seq_argv("/tmp/frame_%04d.png", "out.mp4", fps=12)
+    assert seq[seq.index("-i") + 1] == "/tmp/frame_%04d.png"
+    assert F.first_frame_argv("clip.mp4", "f.png")[-1] == "f.png"
 
 
 def test_probe_nonexistent_is_ffmpeg_error():
