@@ -36,7 +36,10 @@ photo, video or sentence, or ``/gif <words>``, or a bare ``/gif`` for a tiny
 self-aware typecard. Bare videos, chatter, stickers and joins are ignored
 without a word (other bots own the commands we do not know, unless one is
 addressed ``@us``), but chatter still *remembers* the sender so their DMs
-work later. Everyone in a group or channel the bot is in is trusted (the
+work later. Ignored room text — not a command this bot handles — is also
+appended as a short preview to ``<home>/digest-events.jsonl`` for
+``clipwrightd.ops digest``, along with session opens, web-seed fallbacks,
+and render errors. That file is not a second poller. Everyone in a group or channel the bot is in is trusted (the
 owner put it there on purpose — Test2 the same as weir and bencho). Everything the bot sends in a room is a reply — to the ``/gif``
 that opened the session (kept as ``origin_message_id``) or to the message
 that asked. Buttons and text prompts belong to the user who opened the
@@ -804,6 +807,31 @@ class Daemon:
 
     # -- messages ------------------------------------------------------------
 
+    def _digest(self, kind: str, chat_id: int | None, user_id: int | None, text: str = "",
+                *, session: str | None = None, recipe: str | None = None,
+                detail: str | None = None) -> None:
+        """Append one morning-digest event. A failure here never changes the reply."""
+        try:
+            from clipwrightd.ops import record_event
+            record_event(self.home, kind=kind, chat_id=chat_id, user_id=user_id, text=text,
+                         session=session, recipe=recipe, detail=detail, token=self.config.token)
+        except Exception:
+            log.warning("could not record digest event (%s)", kind, exc_info=True)
+
+    def _note_chatter(self, chat_id: int, uid: int, msg: dict) -> None:
+        """Preview of ignored room text. Commands and prompt answers never reach here."""
+        preview = _text_of(msg)
+        if preview:
+            self._digest("chatter", chat_id, uid, preview)
+
+    def _open_session(self, uid: int, chat_id: int, inst: dict, origin: int | None) -> str:
+        """Create a session and note it for the digest. Returns the token."""
+        token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
+        text = recipe.get(inst, "caption.text")
+        self._digest("session", chat_id, uid, text if isinstance(text, str) else "",
+                     session=token, recipe=str(inst.get("recipe") or ""))
+        return token
+
     def _handle_message(self, msg: dict) -> None:
         kind = _chat_kind(msg.get("chat"))
         if kind is None:
@@ -838,6 +866,7 @@ class Daemon:
                 self._on_text(text, uid, chat_id, origin=origin, guest=guest)
             else:
                 log.debug("ignoring a non-command message from user %s in group %s", uid, chat_id)
+                self._note_chatter(chat_id, uid, msg)
             return
         media, kind = _seed_media(msg)
         if media is not None:
@@ -967,7 +996,7 @@ class Daemon:
                 self._tell(chat_id, str(why), origin)
                 return
             except Exception as exc:
-                self._report_failure(chat_id, exc, f"upload from user {uid}", origin)
+                self._report_failure(chat_id, exc, f"upload from user {uid}", origin, user_id=uid)
                 return
             self._job(token, self._render_preview)()
         return run
@@ -982,7 +1011,7 @@ class Daemon:
                 self._tell(chat_id, str(why), origin)
                 return
             except Exception as exc:
-                self._report_failure(chat_id, exc, f"intention from user {uid}", origin)
+                self._report_failure(chat_id, exc, f"intention from user {uid}", origin, user_id=uid)
                 return
             if note:
                 self._tell(chat_id, note, origin)
@@ -1012,7 +1041,7 @@ class Daemon:
         inst["input"] = dest
         self._prime_trim(inst, probe, dest)
         self._apply_caption(inst, name, intention)
-        token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
+        token = self._open_session(uid, chat_id, inst, origin)
         log.info("session %s for user %s: %s %s (%.1fs %dx%d)", token, uid, name, dest,
                  probe.duration, probe.width, probe.height)
         return token
@@ -1031,9 +1060,11 @@ class Daemon:
             except FetchError as err:
                 log.info("web seed failed for %r: %s", text[:80], err)
                 note = f"Couldn't fetch a picture ({err}); made a typecard instead."
+                self._digest("seed_fail", chat_id, uid, text, detail=str(err))
             except Exception:
                 log.exception("web seed crashed for %r", text[:80])
                 note = "Couldn't fetch a picture; made a typecard instead."
+                self._digest("seed_fail", chat_id, uid, text, detail="web seed failed")
                 src = None
         if src:
             try:
@@ -1042,19 +1073,20 @@ class Daemon:
                 _unlink(src)
                 src = None
                 note = f"{why} Made a typecard instead."
+                self._digest("seed_fail", chat_id, uid, text, detail=str(why))
             else:
                 name = self._recipe_for_seed("photo", probe)
                 inst = recipe.defaults(self.cookbook[name])
                 inst["input"] = src
                 self._prime_trim(inst, probe, src)
                 self._apply_caption(inst, name, text)
-                token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
+                token = self._open_session(uid, chat_id, inst, origin)
                 log.info("session %s for user %s: web seed %s -> %s", token, uid, text[:40], src)
                 return token, note
         name = TEXT_RECIPE if TEXT_RECIPE in self.cookbook else DEFAULT_RECIPE
         inst = recipe.defaults(self.cookbook[name])
         self._apply_caption(inst, name, text)
-        token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
+        token = self._open_session(uid, chat_id, inst, origin)
         log.info("session %s for user %s: typecard %r", token, uid, text[:40])
         return token, note
 
@@ -1193,7 +1225,7 @@ class Daemon:
             self._nag(chat_id, uid, why, origin, guest)
             return
         _clamp_segment(inst)
-        token = self.store.create_session(uid, chat_id, inst, origin_message_id=origin)
+        token = self._open_session(uid, chat_id, inst, origin)
         log.info("remix %s -> session %s for user %s", sent["file_unique_id"], token, uid)
         self._submit(uid, chat_id, self._job(token, self._render_preview), origin=origin)
 
@@ -1399,10 +1431,12 @@ class Daemon:
             try:
                 step(sess)
             except Exception as exc:
-                self._report_failure(sess.chat_id, exc, f"render for session {token}", sess.origin_message_id)
+                self._report_failure(sess.chat_id, exc, f"render for session {token}",
+                                     sess.origin_message_id, user_id=sess.user_id)
         return run
 
-    def _report_failure(self, chat_id: int, exc: Exception, what: str, origin: int | None = None) -> None:
+    def _report_failure(self, chat_id: int, exc: Exception, what: str, origin: int | None = None,
+                        *, user_id: int | None = None) -> None:
         """One log line and one message for a job that failed.
 
         While the daemon is shutting down the honest message is that it was
@@ -1414,6 +1448,7 @@ class Daemon:
             self._tell(chat_id, SHUT_DOWN_MID_RENDER, origin)
             return
         log.error("%s failed", what, exc_info=exc)
+        self._digest("error", chat_id, user_id, f"{what}: {exc}")
         self._tell(chat_id, _user_error(exc), origin)
 
     def _render_preview(self, sess: Session) -> None:

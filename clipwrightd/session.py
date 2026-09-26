@@ -273,6 +273,14 @@ class Store:
             rows = self._conn.execute("SELECT token FROM sessions").fetchall()
         return {row["token"] for row in rows}
 
+    def list_sessions(self) -> list[Session]:
+        """Every live session, most recently updated first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM sessions ORDER BY updated_at DESC"
+            ).fetchall()
+        return [_session_from_row(row) for row in rows]
+
     def referenced_inputs(self) -> set[str]:
         """Every ``input`` path a live session or a ledger entry still names."""
         with self._lock:
@@ -313,8 +321,16 @@ class Store:
             ).fetchone()
         if row is None:
             return None
-        return LedgerEntry(file_unique_id=row["file_unique_id"], recipe=json.loads(row["recipe_json"]),
-                           token=row["token"], user_id=row["user_id"], created_at=row["created_at"])
+        return _ledger_from_row(row)
+
+    def ledger_since(self, since: float) -> list[LedgerEntry]:
+        """Ledger rows created at or after ``since`` (unix time), newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ledger WHERE created_at >= ? ORDER BY created_at DESC",
+                (since,),
+            ).fetchall()
+        return [_ledger_from_row(row) for row in rows]
 
     # -- quota --------------------------------------------------------------
 
@@ -372,6 +388,11 @@ class Store:
                 "SELECT chat_id FROM known_groups ORDER BY chat_id"
             ).fetchall()
         return [row["chat_id"] for row in rows]
+
+
+def _ledger_from_row(row: sqlite3.Row) -> LedgerEntry:
+    return LedgerEntry(file_unique_id=row["file_unique_id"], recipe=json.loads(row["recipe_json"]),
+                       token=row["token"], user_id=row["user_id"], created_at=row["created_at"])
 
 
 def _session_from_row(row: sqlite3.Row) -> Session:

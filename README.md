@@ -93,6 +93,8 @@ separate heartbeat file. A process that just started gets one `--max-age`
 window to finish its first poll. A long poll waits up to 50 seconds and
 errors back off up to 60 seconds, so the default 600 seconds means stuck.
 
+Morning Brief asks Grok Bot for a “morning digest”. Grok runs `python3 -m clipwrightd.ops digest` (default `--since 16`, `--home` the same state dir) and does not start a second `getUpdates` poller. The command prints a short summary and writes `$CLIPWRIGHT_HOME/digest-latest.json` (`--json PATH` also appends one JSON line, for example `digest.jsonl`). It includes pidfile and offset age, open `/gif` sessions (token, user, chat, recipe, caption or seed text, created and updated), ledger exports in the window, and digest events: ignored group, supergroup, and channel text (a ~160-character preview, kept about 48 hours in `digest-events.jsonl`), `/gif` session opens, web-seed failures that fell back to a typecard, and render errors. No bot token and no media bytes. **Privacy mode must stay off** in BotFather, or the poller never receives the chatter to record. `CLIPWRIGHT_GROUP_IDS`, when set, scopes which rooms are recorded; a room outside that list is dropped before any digest event is written.
+
 Once installed, the same commands are `clipwright-ops`. `--home DIR` matches
 `clipwrightd --home`.
 
@@ -395,7 +397,7 @@ clipwright/              the engine — pure, importable, knows nothing about Te
   cookbook/*.toml        recipe definitions (gifify, caption-loop, boomerang, ken-burns, typecard)
 clipwrightd/             the bot — a client of the engine
   poll.py                getUpdates loop, pidfile lock, offset persistence, every handler
-  ops.py                 live-src deploy/restart/status/health (pidfile + offset mtime)
+  ops.py                 live-src deploy/restart/status/health, and `ops digest`
   fetch.py               Wikimedia Commons still search for /gif <words> (injectable; mocked in tests)
   keyboards.py           knob spec -> inline keyboard, 64-byte callback encoding
   session.py             SQLite: sessions, undo stack, file ledger, quotas

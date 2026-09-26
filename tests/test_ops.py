@@ -459,3 +459,133 @@ def test_help_exits_zero(capsys):
         main(["--help"])
     assert exc.value.code == 0
     assert "deploy" in capsys.readouterr().out
+
+
+# -- morning digest ---------------------------------------------------------
+
+TOKEN = "123456789:AAHsecretTokenValueDontPrintThis000"
+
+
+def test_record_event_truncates_scrubs_and_drops_old_lines(tmp_path):
+    from clipwrightd.ops import PREVIEW_CHARS, load_events, record_event
+
+    home = str(tmp_path / "home")
+    record_event(home, kind="chatter", chat_id=-100, user_id=7,
+                 text="ancient aside", ts=time.time() - 49 * 3600)
+    assert load_events(home) == []
+    long = "hello " + ("x" * 400) + " " + TOKEN
+    saved = record_event(home, kind="chatter", chat_id=-100, user_id=7, text=long, token=TOKEN)
+    assert len(saved["text_preview"]) == PREVIEW_CHARS
+    assert saved["text_preview"].endswith("…")
+    assert TOKEN not in saved["text_preview"] and "<token>" not in saved["text_preview"].split()[0]
+    assert "file_id" not in saved
+    events = load_events(home)
+    assert len(events) == 1 and TOKEN not in events[0]["text_preview"]
+    mode = os.stat(os.path.join(home, "digest-events.jsonl")).st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_event_ring_stays_under_the_size_cap(tmp_path, monkeypatch):
+    import clipwrightd.ops as ops
+
+    monkeypatch.setattr(ops, "MAX_EVENT_BYTES", 900)
+    home = str(tmp_path / "home")
+    for i in range(40):
+        ops.record_event(home, kind="chatter", chat_id=-5, user_id=i, text=f"line {i} " + ("y" * 80))
+    raw = (tmp_path / "home" / "digest-events.jsonl").read_bytes()
+    assert len(raw) <= 900 or raw.count(b"\n") == 1
+    assert b"line 39" in raw
+    assert b"line 0 " not in raw
+
+
+def test_digest_reads_a_seeded_home(home, capsys):
+    import json
+    import sqlite3
+
+    from clipwrightd.ops import record_event
+    from clipwrightd.session import Store
+
+    now = time.time()
+    db = home / "state.db"
+    store = Store(str(db))
+    recipe = {"recipe": "typecard", "caption": {"text": "overnight seed"}}
+    token = store.create_session(7, -100777, recipe)
+    store.ledger_put("uniq-recent", recipe, token, 7)
+    store.ledger_put("uniq-old", {"recipe": "gifify", "caption": {"text": "stale export"}}, "zzzzzz", 9)
+    store.close()
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE ledger SET created_at = ? WHERE file_unique_id = ?", (now - 30 * 3600, "uniq-old"))
+    conn.commit()
+    conn.close()
+
+    record_event(str(home), kind="chatter", chat_id=-100777, user_id=7, text="did the deploy land", ts=now - 3600)
+    record_event(str(home), kind="error", chat_id=-100777, user_id=7, text="render for session abc: palette exploded",
+                 ts=now - 7200)
+    record_event(str(home), kind="seed_fail", chat_id=-100777, user_id=7, text="dog",
+                 detail="Commons had no picture", ts=now - 1800)
+    # older than the 16h window, and older than the 48h ring: gone after digest prunes
+    aged = home / "digest-events.jsonl"
+    with aged.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": now - 50 * 3600, "chat_id": -100777, "user_id": 7,
+                             "kind": "chatter", "text_preview": "last week"}) + "\n")
+        fh.write(json.dumps({"ts": now - 20 * 3600, "chat_id": -100777, "user_id": 7,
+                             "kind": "chatter", "text_preview": "yesterday afternoon",
+                             "file_id": "should-not-survive"}) + "\n")
+
+    pid = home / "daemon.pid"
+    pid.write_text(f"{os.getpid()}\n")
+    held = open(pid, "r+", encoding="utf-8")
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    offset = home / "offset"
+    offset.write_text("4821\n")
+    os.utime(offset, (now - 30, now - 30))
+    env = home / "bot.env"
+    env.write_text(f"CLIPWRIGHT_BOT_TOKEN={TOKEN}\nCLIPWRIGHT_OWNER_ID=7\n")
+    os.chmod(env, 0o600)
+
+    jsonl = home / "digest.jsonl"
+    try:
+        assert main(["--home", str(home), "digest", "--since", "16", "--json", str(jsonl)]) == 0
+    finally:
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+        held.close()
+    out = capsys.readouterr().out
+    assert "open sessions: 1" in out
+    assert token in out and "typecard" in out and "overnight seed" in out
+    assert "stale export" not in out
+    assert "palette exploded" in out and "Commons had no picture" in out
+    assert "did the deploy land" in out
+    assert "last week" not in out and "yesterday afternoon" not in out
+    assert TOKEN not in out and "4821" in out
+
+    report = json.loads((home / "digest-latest.json").read_text())
+    assert report["since_hours"] == 16
+    assert report["health"]["offset"] == 4821
+    assert report["health"]["locked"] is True
+    assert report["health"]["pidfile_age_s"] is not None
+    assert report["health"]["offset_age_s"] >= 20
+    assert report["open_sessions"] == [{
+        "token": token,
+        "user_id": 7,
+        "chat_id": -100777,
+        "recipe": "typecard",
+        "text": "overnight seed",
+        "created_at": report["open_sessions"][0]["created_at"],
+        "updated_at": report["open_sessions"][0]["updated_at"],
+    }]
+    assert [row["file_unique_id"] for row in report["exports"]] == ["uniq-recent"]
+    assert {event["kind"] for event in report["errors"]} == {"error", "seed_fail"}
+    assert report["chatter"][0]["text_preview"] == "did the deploy land"
+    blob = json.dumps(report)
+    assert TOKEN not in blob and "file_id" not in blob and "should-not-survive" not in blob
+    ring = (home / "digest-events.jsonl").read_text()
+    assert "last week" not in ring and "file_id" not in ring and "should-not-survive" not in ring
+    assert "yesterday afternoon" in ring
+    assert stat.S_IMODE((home / "digest-latest.json").stat().st_mode) == 0o600
+
+    assert main(["--home", str(home), "digest", "--json", str(jsonl)]) == 0
+    lines = jsonl.read_text().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["open_sessions"][0]["token"] == token
+    assert main(["--home", str(home), "digest", "--since", "-1"]) == 2
+    assert "since" in capsys.readouterr().err
