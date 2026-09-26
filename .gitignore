@@ -8,3 +8,7 @@ build/
 dist/
 assets/photos/
 assets/Eaten_Ben_Chod.jpg
+# daemon secrets and runtime state — never commit a token
+bot.env
+.env
+*.env

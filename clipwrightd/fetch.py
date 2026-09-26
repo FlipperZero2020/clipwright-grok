@@ -20,7 +20,10 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-USER_AGENT = "Clipwright/0.1 (https://commons.wikimedia.org/wiki/Commons:API; personal GIF foundry)"
+USER_AGENT = (
+    "Clipwright/0.1 clipwright-grok "
+    "(https://commons.wikimedia.org/wiki/Commons:API; Grok Bot GIF foundry)"
+)
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 SEARCH_TIMEOUT_S = 8.0
 DOWNLOAD_TIMEOUT_S = 20.0
