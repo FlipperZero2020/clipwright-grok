@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import io
 import itertools
+import json
 import logging
 import os
 import re
@@ -519,6 +520,74 @@ def test_group_ignores_everything_that_is_not_a_command(daemon, api):
     daemon.handle_update(gmsg(new_chat_members=[_from(GUEST2)]))
     daemon.handle_update(channel_post("just some words"))     # channel chatter is not a job either
     assert api.calls == []
+
+
+def test_ignored_room_text_is_kept_for_the_digest_without_a_reply(daemon, api, home):
+    """Chatter stays silent in the room. The digest ring gets a short preview only."""
+    from clipwrightd.ops import PREVIEW_CHARS, load_events
+
+    token_shape = "123456789:AAHsecretTokenValueDontPrintThis000"
+    daemon.config.token = token_shape
+    daemon.handle_update(gmsg("did the deploy land"))
+    daemon.handle_update(gmsg("x" * 400))
+    daemon.handle_update(gmsg(f"leak {token_shape} please"))
+    daemon.handle_update(gmsg(**video()))
+    daemon.handle_update(gmsg(sticker={"file_id": "AgADSECRET"}))
+    daemon.handle_update(gmsg("/otherbot do a thing"))
+    daemon.handle_update(channel_post("channel aside"))
+    daemon.handle_update(channel_post("unsigned", uid=None))
+    daemon.handle_update(msg("dm words"))
+    daemon.config.group_ids = {GROUP}
+    daemon.handle_update(msg("outside the list", uid=GUEST, chat=-100999))
+    assert api.of("getUpdates") == []
+    assert api.texts() == ["Send a photo or a video, or /gif some words. /help for how."]
+    events = load_events(home)
+    chatter = [event["text_preview"] for event in events if event["kind"] == "chatter"]
+    assert chatter[0] == "did the deploy land"
+    assert len(chatter[1]) == PREVIEW_CHARS and chatter[1].endswith("…")
+    assert token_shape not in json.dumps(events) and "<token>" in chatter[2]
+    assert "channel aside" in chatter
+    assert "dm words" not in chatter and "outside the list" not in chatter
+    assert "unsigned" not in chatter and "/otherbot" not in "".join(chatter)
+    assert "AgADSECRET" not in json.dumps(events) and "file_id" not in json.dumps(events)
+    assert all(event["kind"] == "chatter" for event in events)
+
+
+def test_a_prompt_reply_is_not_digest_chatter(daemon, api, store, cook, home):
+    from clipwrightd.ops import load_events
+
+    token, _asked = gif_in_group(daemon, api)
+    daemon.handle_update(cb(f"r/{token}/caption-loop", uid=GUEST, chat=GROUP))
+    daemon.handle_update(cb(f"t/{token}/0", uid=GUEST, chat=GROUP))
+    daemon.username = BOT_NAME
+    daemon.handle_update(gmsg("lol same", uid=GUEST))
+    daemon.handle_update(answer("mine", uid=GUEST))
+    assert store.get(token).recipe["caption"]["text"] == "mine"
+    chatter = [event["text_preview"] for event in load_events(home) if event["kind"] == "chatter"]
+    assert chatter == ["lol same"]
+    assert api.of("getUpdates") == []
+
+
+def test_session_open_seed_fail_and_render_error_are_digest_events(daemon, api, store, cook, fetch, home):
+    from clipwrightd.ops import load_events
+
+    fetch.fail = FetchError("Commons had no picture")
+    daemon.handle_update(gmsg("/gif dog"))
+    cook.fail = RuntimeError("palette exploded")
+    daemon.handle_update(msg(**video()))
+    events = load_events(home)
+    kinds = [event["kind"] for event in events]
+    assert "seed_fail" in kinds and kinds.count("session") == 2 and "error" in kinds
+    failed = next(event for event in events if event["kind"] == "seed_fail")
+    assert failed["text_preview"] == "dog" and "Commons had no picture" in failed["detail"]
+    opened = next(event for event in events if event["kind"] == "session" and event["recipe"] == "typecard")
+    assert opened["text_preview"] == "dog" and opened["user_id"] == GUEST
+    assert store.get(opened["session"]).recipe["recipe"] == "typecard"
+    err = next(event for event in events if event["kind"] == "error")
+    assert "palette exploded" in err["text_preview"] and err["user_id"] == OWNER
+    assert any("Couldn't fetch a picture" in text for text in api.texts())
+    assert "That render didn't work out" in api.texts()[-1]
+    assert "file_id" not in json.dumps(events)
 
 
 def test_a_group_member_can_dm_after_being_seen_in_the_room(daemon, api, store, cook):

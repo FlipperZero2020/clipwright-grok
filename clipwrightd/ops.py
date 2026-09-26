@@ -27,21 +27,33 @@ change when the batch was empty) so the file's mtime is the last poll that
 returned. A process that has just started is allowed one ``--max-age``
 window to finish its first poll. Nothing in here shells out: git and the
 daemon are argv lists.
+
+``digest`` does not poll Telegram. It reads that same pidfile and offset,
+the open sessions and recent ledger rows in ``state.db``, and the short
+ring of events the poller appends to ``digest-events.jsonl`` (ignored room
+text, session opens, web-seed fallbacks, render errors). It prints a
+summary and writes ``digest-latest.json``.
 """
 
 from __future__ import annotations
 
 import argparse
 import fcntl
+import json
+import math
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 from clipwrightd import config as config_mod
-from clipwrightd.poll import LOG_FILE, OFFSET_FILE, PIDFILE
+from clipwrightd.api import redact
+from clipwrightd.poll import LOG_FILE, OFFSET_FILE, PIDFILE, STATE_DB
+from clipwrightd.session import Store
 
 LIVE_SRC = "live-src"
 DAEMON_OUT = "daemon.out"
@@ -56,6 +68,16 @@ DEFAULT_MAX_AGE_S = 600.0
 STOP_TIMEOUT_S = 300.0
 START_WAIT_S = 15.0
 _URL_USERINFO = re.compile(r"://[^/\s@]+@")
+# Bot tokens look like ``123456789:AAH...``. Scrub that shape even when the
+# exact token is not in hand, so a chatter line cannot carry one into the digest.
+_TOKEN_SHAPE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
+
+EVENTS_FILE = "digest-events.jsonl"
+DIGEST_LATEST = "digest-latest.json"
+PREVIEW_CHARS = 160
+RETENTION_S = 48 * 3600
+MAX_EVENT_BYTES = 256 * 1024
+_EVENTS_LOCK = threading.Lock()
 
 
 class OpsError(RuntimeError):
@@ -582,12 +604,371 @@ def format_status(home: str, *, max_age: float = DEFAULT_MAX_AGE_S,
     return "\n".join([f"home: {home}", _head_line(src), remote_line(src, remote), health.summary])
 
 
+def _file_age(path: str, now: float) -> float | None:
+    try:
+        return max(0.0, now - os.stat(path).st_mtime)
+    except OSError:
+        return None
+
+
+def scrub_text(text: str, token: str | None = None) -> str:
+    """Remove a bot token from ``text``. The exact token, then the token shape."""
+    if token:
+        text = redact(token, text)
+    return _TOKEN_SHAPE.sub("<token>", text)
+
+
+def preview_text(text: str, *, token: str | None = None, limit: int = PREVIEW_CHARS) -> str:
+    """One line, token-scrubbed, at most ``limit`` characters."""
+    collapsed = " ".join(scrub_text(str(text), token).split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1] + "…"
+
+
+def events_path(home: str) -> str:
+    return os.path.join(home, EVENTS_FILE)
+
+
+def _dumps_event(event: dict) -> str:
+    return json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+
+def _encoded_size(events: list[dict]) -> int:
+    return sum(len(_dumps_event(event).encode("utf-8")) + 1 for event in events)
+
+
+def _parse_events(text: str) -> tuple[list[dict], bool]:
+    """Decode JSONL. The bool is True when a non-empty line was not an event."""
+    events: list[dict] = []
+    skipped = False
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            skipped = True
+            continue
+        if isinstance(event, dict) and isinstance(event.get("kind"), str):
+            events.append(event)
+        else:
+            skipped = True
+    return events, skipped
+
+
+def _stored_event(event: dict) -> dict:
+    """Fields the ring keeps. A stuffed ``file_id`` or message blob does not survive a rewrite."""
+    out = {key: event[key] for key in ("ts", "chat_id", "user_id", "kind", "text_preview",
+                                       "session", "recipe", "detail") if key in event}
+    for key in ("text_preview", "detail"):
+        if isinstance(out.get(key), str):
+            out[key] = preview_text(out[key])
+    return out
+
+
+def _retain(events: list[dict], now: float) -> list[dict]:
+    """Drop events older than 48h, then the oldest lines, until the ring fits."""
+    cutoff = now - RETENTION_S
+    kept = [_stored_event(event) for event in events
+            if isinstance(event.get("ts"), (int, float)) and not isinstance(event.get("ts"), bool)
+            and event["ts"] >= cutoff]
+    while len(kept) > 1 and _encoded_size(kept) > MAX_EVENT_BYTES:
+        kept.pop(0)
+    return kept
+
+
+def _rewrite_events(fh, events: list[dict]) -> None:
+    fh.seek(0)
+    fh.truncate()
+    for event in events:
+        fh.write(_dumps_event(event) + "\n")
+    fh.flush()
+
+
+def record_event(home: str, *, kind: str, chat_id: int | None, user_id: int | None,
+                 text: str = "", ts: float | None = None, session: str | None = None,
+                 recipe: str | None = None, detail: str | None = None,
+                 token: str | None = None) -> dict:
+    """Append one compact digest event and prune the ring.
+
+    The stored object is ``{ts, chat_id, user_id, kind, text_preview}`` plus
+    optional ``session``, ``recipe``, and ``detail``. No media, no message
+    JSON, no bot token.
+    """
+    now = time.time()
+    event: dict = {
+        "ts": now if ts is None else float(ts),
+        "chat_id": chat_id if isinstance(chat_id, int) and not isinstance(chat_id, bool) else None,
+        "user_id": user_id if isinstance(user_id, int) and not isinstance(user_id, bool) else None,
+        "kind": str(kind)[:32],
+        "text_preview": preview_text(text, token=token),
+    }
+    if session:
+        event["session"] = str(session)[:16]
+    if recipe:
+        event["recipe"] = str(recipe)[:64]
+    if detail:
+        event["detail"] = preview_text(detail, token=token)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    path = events_path(home)
+    with _EVENTS_LOCK:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        fh = os.fdopen(fd, "r+", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            parsed, _skipped = _parse_events(fh.read())
+            _rewrite_events(fh, _retain(parsed + [event], now))
+        finally:
+            fh.close()
+    return event
+
+
+def load_events(home: str, *, since_ts: float | None = None, prune: bool = False,
+                now: float | None = None) -> list[dict]:
+    """Events in ``digest-events.jsonl``. ``prune`` rewrites the 48h / size cap."""
+    path = events_path(home)
+    now = time.time() if now is None else now
+    if not os.path.isfile(path):
+        return []
+    with _EVENTS_LOCK:
+        try:
+            fh = open(path, "r+", encoding="utf-8")
+        except OSError:
+            fh = None
+        if fh is None:
+            try:
+                with open(path, encoding="utf-8") as readable:
+                    parsed, _skipped = _parse_events(readable.read())
+            except OSError:
+                return []
+            kept = _retain(parsed, now)
+        else:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                parsed, skipped = _parse_events(fh.read())
+                kept = _retain(parsed, now)
+                if prune and (skipped or kept != parsed):
+                    _rewrite_events(fh, kept)
+            finally:
+                fh.close()
+    if since_ts is None:
+        return kept
+    return [event for event in kept
+            if isinstance(event.get("ts"), (int, float)) and event["ts"] >= since_ts]
+
+
+def _caption_text(inst: dict) -> str | None:
+    caption = inst.get("caption")
+    if not isinstance(caption, dict):
+        return None
+    text = caption.get("text")
+    if isinstance(text, str) and text.strip():
+        return preview_text(text)
+    return None
+
+
+def _session_view(sess) -> dict:
+    return {
+        "token": sess.token,
+        "user_id": sess.user_id,
+        "chat_id": sess.chat_id,
+        "recipe": sess.recipe.get("recipe"),
+        "text": _caption_text(sess.recipe),
+        "created_at": sess.created_at,
+        "updated_at": sess.updated_at,
+    }
+
+
+def _export_view(entry) -> dict:
+    return {
+        "file_unique_id": entry.file_unique_id,
+        "user_id": entry.user_id,
+        "token": entry.token,
+        "recipe": entry.recipe.get("recipe"),
+        "text": _caption_text(entry.recipe),
+        "created_at": entry.created_at,
+    }
+
+
+def _health_view(home: str, now: float) -> dict:
+    """Pidfile and offset age from the files ``health`` already reads. No poll."""
+    health = assess(home, now=now)
+    return {
+        "ok": health.ok,
+        "summary": health.summary,
+        "pid": health.pid,
+        "locked": health.locked,
+        "offset": read_offset(home),
+        "pidfile_age_s": _file_age(pidfile_path(home), now),
+        "offset_age_s": _file_age(os.path.join(home, OFFSET_FILE), now),
+        "poll_age_s": health.poll_age_s,
+    }
+
+
+def _public_event(event: dict) -> dict:
+    """The fields a digest may carry. Extra keys (message blobs, file ids) are dropped."""
+    out = {key: event[key] for key in ("ts", "chat_id", "user_id", "kind", "text_preview",
+                                       "session", "recipe", "detail") if key in event}
+    for key in ("text_preview", "detail"):
+        if isinstance(out.get(key), str):
+            out[key] = preview_text(out[key])
+    return out
+
+
+def build_digest(home: str, *, since_hours: float = 16.0, now: float | None = None) -> dict:
+    """Structured overnight signal. Does not read ``bot.env`` or call Telegram."""
+    now = time.time() if now is None else now
+    since_ts = now - since_hours * 3600.0
+    sessions: list[dict] = []
+    exports: list[dict] = []
+    db_path = os.path.join(home, STATE_DB)
+    if os.path.isfile(db_path):
+        store = Store(db_path)
+        try:
+            sessions = [_session_view(sess) for sess in store.list_sessions()]
+            exports = [_export_view(entry) for entry in store.ledger_since(since_ts)]
+        finally:
+            store.close()
+    events = [_public_event(event) for event in load_events(home, since_ts=since_ts, prune=True, now=now)]
+    return {
+        "generated_at": now,
+        "since_hours": since_hours,
+        "since_ts": since_ts,
+        "health": _health_view(home, now),
+        "open_sessions": sessions,
+        "exports": exports,
+        "errors": [event for event in events if event.get("kind") in ("error", "seed_fail")],
+        "chatter": [event for event in events if event.get("kind") == "chatter"],
+        "events": events,
+    }
+
+
+def _age(seconds: float | None) -> str:
+    if seconds is None:
+        return "none"
+    seconds = max(0.0, seconds)
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 90 * 60:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def format_digest(report: dict) -> str:
+    """The human summary ``digest`` prints. The JSON file is the full record."""
+    health = report["health"]
+    lines = [f"clipwright morning digest — last {report['since_hours']:g}h", health["summary"]]
+    offset = health.get("offset")
+    lines.append(
+        "pidfile age " + _age(health.get("pidfile_age_s"))
+        + "; offset age " + _age(health.get("offset_age_s"))
+        + (f" (offset {offset})" if offset is not None else "")
+    )
+    sessions = report["open_sessions"]
+    lines.append("")
+    lines.append(f"open sessions: {len(sessions)}")
+    generated = report["generated_at"]
+    for sess in sessions:
+        text = f" {sess['text']!r}" if sess.get("text") else ""
+        updated = sess.get("updated_at")
+        ago = _age(None if updated is None else generated - updated)
+        lines.append(
+            f"  {sess['token']} user {sess['user_id']} chat {sess['chat_id']} "
+            f"{sess.get('recipe')}{text} updated {ago} ago"
+        )
+    exports = report["exports"]
+    lines.append(f"exports: {len(exports)}")
+    for entry in exports:
+        text = f" {entry['text']!r}" if entry.get("text") else ""
+        lines.append(
+            f"  {entry.get('recipe')} user {entry.get('user_id')} "
+            f"token {entry.get('token')}{text}"
+        )
+    errors = report["errors"]
+    lines.append(f"errors: {len(errors)}")
+    for event in errors:
+        detail = event.get("detail") or event.get("text_preview") or ""
+        lines.append(
+            f"  {event.get('kind')} user {event.get('user_id')} "
+            f"chat {event.get('chat_id')} {detail}"
+        )
+    chatter = report["chatter"]
+    chats = {event.get("chat_id") for event in chatter}
+    lines.append(f"chatter: {len(chatter)} in {len(chats)} chat(s)")
+    shown = chatter[-40:]
+    if len(chatter) > len(shown):
+        lines.append(f"  … {len(chatter) - len(shown)} older in {DIGEST_LATEST}")
+    for event in shown:
+        lines.append(
+            f"  chat {event.get('chat_id')} user {event.get('user_id')}: "
+            f"{event.get('text_preview')}"
+        )
+    return "\n".join(lines)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def _write_private(path: str, text: str) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(tmp, 0o600)
+        _write_all(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def _append_jsonl(path: str, obj: dict) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    line = (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _write_all(fd, line)
+    finally:
+        os.close(fd)
+
+
+def write_digest(home: str, report: dict, *, json_path: str | None = None) -> str:
+    """Write ``digest-latest.json``. Optionally append one JSONL line to ``json_path``."""
+    latest = os.path.join(home, DIGEST_LATEST)
+    _write_private(latest, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    if json_path and os.path.abspath(json_path) != os.path.abspath(latest):
+        _append_jsonl(json_path, report)
+    return latest
+
+
+def _cmd_digest(home: str, *, since_hours: float, json_path: str | None) -> int:
+    try:
+        report = build_digest(home, since_hours=since_hours)
+        print(format_digest(report))
+        write_digest(home, report, json_path=json_path)
+    except (OSError, sqlite3.Error) as err:
+        raise OpsError(f"could not write the digest: {err}") from None
+    return 0
+
+
 def _running(health: Health) -> bool:
     return bool(health.locked and health.pid and pid_alive(health.pid) and health.ok)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python3 -m clipwrightd.ops deploy|restart|status|health``."""
+    """``python3 -m clipwrightd.ops deploy|restart|status|health|digest``."""
     parser = argparse.ArgumentParser(
         prog="clipwrightd.ops",
         description="Deploy and supervise Grok Bot's Clipwright daemon from $CLIPWRIGHT_HOME/live-src.",
@@ -621,12 +1002,26 @@ def main(argv: list[str] | None = None) -> int:
     health_p = sub.add_parser("health", help="exit 1 when the pidfile is stale or getUpdates has stalled")
     add_max_age(health_p)
 
+    digest_p = sub.add_parser(
+        "digest",
+        help="print overnight signal and write digest-latest.json (does not poll Telegram)",
+    )
+    digest_p.add_argument("--since", type=float, default=16.0, metavar="HOURS",
+                          help="hours of history to include (default 16)")
+    digest_p.add_argument("--json", metavar="PATH",
+                          help="also append this digest as one JSON line to PATH")
+
     args = parser.parse_args(argv)
-    if args.max_age <= 0:
+    if getattr(args, "max_age", None) is not None and args.max_age <= 0:
         print("clipwrightd ops: --max-age must be greater than 0", file=sys.stderr)
         return 2
     home = home_dir(args.home)
     try:
+        if args.cmd == "digest":
+            if not math.isfinite(args.since) or args.since < 0:
+                print("clipwrightd ops: --since must be a number of hours >= 0", file=sys.stderr)
+                return 2
+            return _cmd_digest(home, since_hours=args.since, json_path=args.json)
         if args.cmd == "health":
             health = assess(home, max_age=args.max_age)
             print(health.summary)
