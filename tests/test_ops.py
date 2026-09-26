@@ -24,6 +24,8 @@ from clipwrightd.ops import (
     main,
     process_started_at,
     read_offset,
+    remote_line,
+    repo_name,
     start_daemon,
     stop_daemon,
     sync_live_src,
@@ -104,10 +106,20 @@ def _release(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
 
 
+def _commit_repo(path, text: str, message: str) -> str:
+    path.mkdir()
+    _git(str(path), "init", "-b", "main")
+    (path / "README").write_text(text)
+    _git(str(path), "add", "README")
+    _git(str(path), "commit", "-m", message)
+    return str(path)
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     for key, value in _GIT_ENV.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("CLIPWRIGHT_OPS_REMOTE", raising=False)
     directory = tmp_path / "state"
     directory.mkdir()
     return directory
@@ -356,6 +368,90 @@ def test_status_redacts_userinfo_in_a_commit_subject(home, tmp_path, capsys):
 def test_max_age_must_be_positive(capsys):
     assert main(["health", "--max-age", "0"]) == 2
     assert "--max-age" in capsys.readouterr().err
+
+
+def test_repo_name_strips_git_suffix_and_userinfo():
+    assert repo_name("https://github.com/FlipperZero2020/clipwright-grok.git") == "clipwright-grok"
+    assert repo_name("https://github.com/FlipperZero2020/clipwright-grok") == "clipwright-grok"
+    assert repo_name("git@github.com:FlipperZero2020/CLIPWRIGHT_PLAN.git") == "CLIPWRIGHT_PLAN"
+    assert repo_name("ssh://git@github.com/org/clipwright-grok") == "clipwright-grok"
+    assert repo_name("https://user:secret@github.com/org/clipwright-grok.git") == "clipwright-grok"
+
+
+def test_plan_origin_is_refused_before_checkout(home, tmp_path):
+    """The production failure: origin is CLIPWRIGHT_PLAN, deploy must not detach there."""
+    plan = _commit_repo(tmp_path / "CLIPWRIGHT_PLAN", "old\n", "old")
+    src = _clone(home, plan)
+    (tmp_path / "CLIPWRIGHT_PLAN" / "README").write_text("plan-main\n")
+    _git(plan, "commit", "-am", "plan moves")
+    plan_head = _git(plan, "rev-parse", "HEAD")
+    cloned = _git(src, "rev-parse", "HEAD")
+    assert cloned != plan_head
+    with pytest.raises(OpsError, match="CLIPWRIGHT_PLAN") as err:
+        sync_live_src(str(home), "main")
+    assert "upstream" in str(err.value) and "clipwright-grok" in str(err.value)
+    assert _git(src, "rev-parse", "HEAD") == cloned
+    assert (home / "live-src" / "README").read_text() == "old\n"
+    # A URL that only looks like the plan repo is the same refusal, before fetch.
+    _git(src, "remote", "set-url", "origin", "https://github.com/example/CLIPWRIGHT_PLAN.git")
+    with pytest.raises(OpsError, match="CLIPWRIGHT_PLAN"):
+        sync_live_src(str(home), "main")
+    assert _git(src, "rev-parse", "HEAD") == cloned
+    _git(src, "remote", "set-url", "origin", plan)
+    assert sync_live_src(str(home), "main", force_remote=True) == plan_head
+    assert (home / "live-src" / "README").read_text() == "plan-main\n"
+
+
+def test_fork_remote_is_used_instead_of_plan_origin(home, tmp_path):
+    plan = _commit_repo(tmp_path / "CLIPWRIGHT_PLAN", "plan\n", "plan")
+    fork = _commit_repo(tmp_path / "clipwright-grok", "fork\n", "fork")
+    src = _clone(home, plan)
+    _git(src, "remote", "add", "grok", fork)
+    fork_head = _git(fork, "rev-parse", "HEAD")
+    assert sync_live_src(str(home), "main") == fork_head
+    assert (home / "live-src" / "README").read_text() == "fork\n"
+    line = remote_line(src)
+    assert line.startswith("remote: grok ")
+    assert "clipwright-grok" in line and "used instead of origin" in line
+
+
+def test_deploy_refuses_plan_origin_and_status_names_it(home, tmp_path, monkeypatch, capsys):
+    plan = _commit_repo(tmp_path / "CLIPWRIGHT_PLAN", "plan\n", "plan")
+    _clone(home, plan)
+    monkeypatch.setattr("clipwrightd.ops.restart", lambda *a, **k: pytest.fail("restarted the plan repo"))
+    assert main(["--home", str(home), "deploy", "main"]) == 2
+    assert "CLIPWRIGHT_PLAN" in capsys.readouterr().err
+    assert main(["--home", str(home), "status"]) == 0
+    status = capsys.readouterr().out
+    assert "remote: origin" in status and "CLIPWRIGHT_PLAN" in status
+    assert "--force-remote" in status
+
+
+def test_remote_flag_beats_env_and_fork_preference(home, tmp_path, monkeypatch, capsys):
+    fork = _commit_repo(tmp_path / "clipwright-grok", "fork\n", "fork")
+    other = _commit_repo(tmp_path / "other-repo", "other\n", "other")
+    src = _clone(home, fork)
+    _git(src, "remote", "add", "other", other)
+    monkeypatch.setattr(
+        "clipwrightd.ops.restart",
+        lambda *a, **k: Health(True, "ok: pid 7 holds pidfile; getUpdates 0s ago",
+                               pid=os.getpid(), locked=True),
+    )
+    monkeypatch.setattr("clipwrightd.ops.pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        "clipwrightd.ops.assess",
+        lambda *a, **k: Health(True, "ok: pid 7 holds the pidfile; getUpdates 0s ago",
+                               pid=7, locked=True),
+    )
+    monkeypatch.setenv("CLIPWRIGHT_OPS_REMOTE", "other")
+    assert main(["--home", str(home), "deploy", "--remote", "origin", "main"]) == 0
+    assert (home / "live-src" / "README").read_text() == "fork\n"
+    out = capsys.readouterr().out
+    assert "remote: origin" in out and "clipwright-grok" in out
+
+    assert main(["--home", str(home), "deploy", "main"]) == 0
+    assert (home / "live-src" / "README").read_text() == "other\n"
+    assert "remote: other" in capsys.readouterr().out
 
 
 def test_help_exits_zero(capsys):

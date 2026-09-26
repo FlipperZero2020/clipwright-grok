@@ -5,8 +5,14 @@ pidfile, the update offset, the log, and ``live-src/`` — a git checkout of
 this fork. The daemon runs from that checkout, so a code change is a
 checkout plus a restart, not a reread of ``poll.py``.
 
-``deploy REF`` fetches ``origin`` when that remote exists, checks the ref
-out detached, restarts, and prints status. ``restart`` is pidfile-aware:
+``deploy REF`` fetches one remote, checks the ref out detached, restarts,
+and prints status. ``live-src``'s ``origin`` must be this fork
+(``clipwright-grok``). A remote whose URL still names ``CLIPWRIGHT_PLAN``
+is refused unless ``--force-remote``; name that remote ``upstream`` if you
+keep it. When a ``clipwright-grok`` URL is configured next to ``origin``,
+deploy fetches the fork remote and says so on the status line.
+``$CLIPWRIGHT_OPS_REMOTE`` or ``--remote`` picks a remote by name.
+``restart`` is pidfile-aware:
 it sends SIGTERM only to a pid that currently holds the flock on
 ``daemon.pid``, and it will not start a second poller while that lock is
 held. A live pid that does not hold the lock is left alone (it may have
@@ -39,6 +45,9 @@ from clipwrightd.poll import LOG_FILE, OFFSET_FILE, PIDFILE
 
 LIVE_SRC = "live-src"
 DAEMON_OUT = "daemon.out"
+FORK_REPO = "clipwright-grok"
+PLAN_REPO = "CLIPWRIGHT_PLAN"
+OPS_REMOTE_ENV = "CLIPWRIGHT_OPS_REMOTE"
 # Long poll waits 50s and errors back off to 60s. Ten minutes is "stuck".
 DEFAULT_MAX_AGE_S = 600.0
 # A render is allowed to finish (the daemon's SIGTERM path). ffmpeg's own
@@ -106,43 +115,143 @@ def _is_checkout(path: str) -> bool:
     return os.path.isdir(git_path) or os.path.isfile(git_path)
 
 
-def _has_origin(src: str) -> bool:
+def _remote_names(src: str) -> list[str]:
     proc = _git(src, "remote", check=False)
-    return proc.returncode == 0 and "origin" in proc.stdout.split()
+    if proc.returncode != 0:
+        return []
+    return [name for name in proc.stdout.split() if name]
 
 
-def _resolve_ref(src: str, ref: str) -> str:
+def _remote_url(src: str, name: str) -> str:
+    proc = _git(src, "remote", "get-url", name, check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def repo_name(url: str) -> str:
+    """Last path segment of a remote URL, without a trailing ``.git``.
+
+    ``ssh://`` and ``https://`` URLs use the path. ``git@host:org/repo.git``
+    uses the part after the colon. Userinfo is stripped first so a token in
+    the URL cannot become the repo name.
+    """
+    cleaned = _redact(url).strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    if "://" not in cleaned and ":" in cleaned:
+        cleaned = cleaned.split(":", 1)[1]
+    return cleaned.rstrip("/").split("/")[-1]
+
+
+def _is_fork_url(url: str) -> bool:
+    """True when the URL's repo name is this fork (``clipwright-grok``)."""
+    return repo_name(url).lower() == FORK_REPO
+
+
+def _is_plan_url(url: str) -> bool:
+    """True when the URL's repo name is the upstream plan repo."""
+    return repo_name(url).lower() == PLAN_REPO.lower()
+
+
+def choose_remote(src: str, explicit: str | None = None) -> str | None:
+    """The remote ``deploy`` should fetch. None when the checkout has no remotes.
+
+    ``explicit`` (``--remote``) wins, then ``$CLIPWRIGHT_OPS_REMOTE``.
+    Otherwise a remote whose URL names ``clipwright-grok`` wins over
+    ``origin``, including when ``origin`` still points at ``CLIPWRIGHT_PLAN``.
+    If several fork remotes exist, ``origin`` is used when it is one of them;
+    otherwise the name that sorts first. With no fork URL, ``origin`` is used.
+    """
+    names = _remote_names(src)
+    chosen = (explicit or "").strip() or (os.environ.get(OPS_REMOTE_ENV) or "").strip() or None
+    if chosen:
+        if chosen not in names:
+            have = ", ".join(names) or "none"
+            raise OpsError(f"remote {chosen!r} is not in {src} (have: {have})")
+        return chosen
+    forks = [name for name in names if _is_fork_url(_remote_url(src, name))]
+    if forks:
+        return "origin" if "origin" in forks else sorted(forks)[0]
+    if "origin" in names:
+        return "origin"
+    return None
+
+
+def _guard_plan_remote(src: str, remote: str, *, force_remote: bool) -> str:
+    """Refuse a ``CLIPWRIGHT_PLAN`` URL unless ``force_remote``. Return the redacted URL."""
+    url = _redact(_remote_url(src, remote))
+    if _is_plan_url(url) and not force_remote:
+        raise OpsError(
+            f"{remote} points at {url} ({PLAN_REPO}). "
+            f"live-src's deploy remote must be this fork ({FORK_REPO}). "
+            f"Name the plan repo 'upstream' if you keep it, and point origin "
+            f"(or another remote whose URL ends with {FORK_REPO}) at this fork. "
+            f"Re-run with --force-remote to deploy {remote} anyway."
+        )
+    return url
+
+
+def remote_line(src: str, explicit: str | None = None) -> str:
+    """One status line: which remote deploy will fetch, and its URL."""
+    if not _is_checkout(src):
+        return "remote: none"
+    try:
+        remote = choose_remote(src, explicit)
+    except OpsError as err:
+        return f"remote: {err}"
+    if remote is None:
+        return "remote: none"
+    url = _redact(_remote_url(src, remote))
+    note = ""
+    names = _remote_names(src)
+    if _is_plan_url(url):
+        note = (f" ({PLAN_REPO} — deploy refuses this unless --force-remote; "
+                "name it upstream and point a remote at clipwright-grok)")
+    elif remote != "origin" and "origin" in names:
+        note = " (used instead of origin)"
+    return f"remote: {remote} {url}{note}".rstrip()
+
+
+def _resolve_ref(src: str, ref: str, remote: str | None) -> str:
     """The commit ``deploy`` should check out.
 
-    A branch name prefers ``origin/<ref>`` after fetch, so a stale local
+    A branch name prefers ``<remote>/<ref>`` after fetch, so a stale local
     branch does not win. A tag or a raw commit resolves on the second try.
     """
-    for candidate in (f"origin/{ref}", ref):
+    candidates = [ref]
+    if remote:
+        candidates.insert(0, f"{remote}/{ref}")
+    for candidate in candidates:
         proc = _git(src, "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}", check=False)
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip()
-    raise OpsError(f"unknown git ref {ref!r} in {src} (tried origin/{ref} and {ref})")
+    tried = " and ".join(candidates)
+    raise OpsError(f"unknown git ref {ref!r} in {src} (tried {tried})")
 
 
-def sync_live_src(home: str, ref: str, *, force: bool = False) -> str:
+def sync_live_src(home: str, ref: str, *, force: bool = False,
+                  remote: str | None = None, force_remote: bool = False) -> str:
     """Check ``ref`` out detached in ``<home>/live-src``. Return the commit.
 
-    Fetches ``origin`` when that remote exists. A dirty worktree is refused
-    unless ``force``, which discards changes to tracked files
-    (``checkout --force``). Untracked files, including a ``bot.env`` someone
-    left inside the checkout, are left in place — secrets belong in ``home``,
-    not in ``live-src``.
+    Fetches the remote from :func:`choose_remote` (a ``clipwright-grok`` URL
+    beats ``origin``). A ``CLIPWRIGHT_PLAN`` URL is refused unless
+    ``force_remote``. A dirty worktree is refused unless ``force``, which
+    discards changes to tracked files (``checkout --force``). Untracked
+    files, including a ``bot.env`` someone left inside the checkout, are
+    left in place — secrets belong in ``home``, not in ``live-src``.
     """
     src = live_src_dir(home)
     if not _is_checkout(src):
         raise OpsError(
-            f"{src} is not a git checkout. Clone this repo there once "
-            f"(git clone <your remote> {src}), then deploy again. "
+            f"{src} is not a git checkout. Clone this fork there once "
+            f"(git clone <clipwright-grok remote> {src}). "
+            f"origin must be {FORK_REPO}; name {PLAN_REPO} 'upstream' if you keep it. "
             "The live @username is your bot's; this directory is only the code."
         )
-    if _has_origin(src):
-        _git(src, "fetch", "--prune", "origin")
-    commit = _resolve_ref(src, ref)
+    chosen = choose_remote(src, remote)
+    if chosen:
+        _guard_plan_remote(src, chosen, force_remote=force_remote)
+        _git(src, "fetch", "--prune", chosen)
+    commit = _resolve_ref(src, ref, chosen)
     dirty = _git(src, "status", "--porcelain").stdout.strip()
     if dirty and not force:
         raise OpsError(
@@ -445,9 +554,10 @@ def restart(home: str, *, stop_timeout: float = STOP_TIMEOUT_S,
     return wait_until_running(home, timeout=start_timeout, max_age=max_age)
 
 
-def deploy(home: str, ref: str, *, force: bool = False, max_age: float = DEFAULT_MAX_AGE_S) -> tuple[str, Health]:
+def deploy(home: str, ref: str, *, force: bool = False, max_age: float = DEFAULT_MAX_AGE_S,
+           remote: str | None = None, force_remote: bool = False) -> tuple[str, Health]:
     """Sync ``live-src`` to ``ref`` and restart. Returns ``(commit, health)``."""
-    commit = sync_live_src(home, ref, force=force)
+    commit = sync_live_src(home, ref, force=force, remote=remote, force_remote=force_remote)
     return commit, restart(home, max_age=max_age)
 
 
@@ -460,10 +570,16 @@ def _head_line(src: str) -> str:
     return f"live-src: {src} @ {_redact(proc.stdout.strip())}"
 
 
-def format_status(home: str, *, max_age: float = DEFAULT_MAX_AGE_S) -> str:
-    """Home, the live-src commit, and the health summary. Does not change exit status."""
+def format_status(home: str, *, max_age: float = DEFAULT_MAX_AGE_S,
+                  remote: str | None = None) -> str:
+    """Home, the live-src commit, the deploy remote, and the health summary.
+
+    Does not change exit status. ``remote`` is ``--remote`` when deploy
+    passed one; otherwise ``$CLIPWRIGHT_OPS_REMOTE`` or the automatic choice.
+    """
     health = assess(home, max_age=max_age)
-    return "\n".join([f"home: {home}", _head_line(live_src_dir(home)), health.summary])
+    src = live_src_dir(home)
+    return "\n".join([f"home: {home}", _head_line(src), remote_line(src, remote), health.summary])
 
 
 def _running(health: Health) -> bool:
@@ -489,6 +605,11 @@ def main(argv: list[str] | None = None) -> int:
     deploy_p.add_argument("ref", help="git ref to check out (branch, tag, or commit)")
     deploy_p.add_argument("--force", action="store_true",
                           help="discard uncommitted tracked changes in live-src")
+    deploy_p.add_argument("--remote", default=None, metavar="NAME",
+                          help=f"git remote to fetch (default: ${OPS_REMOTE_ENV}, else a "
+                               f"{FORK_REPO} URL, else origin)")
+    deploy_p.add_argument("--force-remote", action="store_true",
+                          help=f"deploy even if that remote's repo name is {PLAN_REPO}")
     add_max_age(deploy_p)
 
     restart_p = sub.add_parser("restart", help="pidfile-aware restart of the current live-src checkout")
@@ -518,9 +639,10 @@ def main(argv: list[str] | None = None) -> int:
             print(format_status(home, max_age=args.max_age))
             return 0 if _running(health) else 1
         if args.cmd == "deploy":
-            commit, health = deploy(home, args.ref, force=args.force, max_age=args.max_age)
+            commit, health = deploy(home, args.ref, force=args.force, max_age=args.max_age,
+                                    remote=args.remote, force_remote=args.force_remote)
             print(f"checked out {commit}")
-            print(format_status(home, max_age=args.max_age))
+            print(format_status(home, max_age=args.max_age, remote=args.remote))
             return 0 if _running(health) else 1
     except OpsError as err:
         print(f"clipwrightd ops: {err}", file=sys.stderr)

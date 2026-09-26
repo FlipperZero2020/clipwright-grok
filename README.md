@@ -36,7 +36,7 @@ One-time, from a clone that already contains `clipwrightd/ops.py`:
 
 ```bash
 mkdir -p ~/.clipwright
-git clone <your-remote> ~/.clipwright/live-src   # this fork; no public URL is assumed
+git clone <clipwright-grok remote> ~/.clipwright/live-src   # origin MUST be this fork
 # write ~/.clipwright/bot.env mode 0600 — token and owner id, see below
 python3 -m clipwrightd.ops --home ~/.clipwright deploy main
 python3 -m clipwrightd.ops --home ~/.clipwright health
@@ -50,11 +50,26 @@ python3 -m clipwrightd.ops health              # exit 0 only when the pidfile is
 python3 -m clipwright doctor                   # toolchain preflight; it does not talk to Telegram
 ```
 
-`deploy REF` fetches `origin` when that remote exists, checks `REF` out
-detached in `live-src` (a branch name prefers `origin/<ref>`), restarts the
-daemon, and prints status. A dirty tree is refused unless `--force`, which
-discards tracked edits and leaves untracked files alone. Put `bot.env` in
-the state directory, not inside `live-src`.
+`live-src`'s **`origin` remote must be this fork** (repo name
+`clipwright-grok`). The upstream plan repo is a different history. If you
+keep it, name that remote **`upstream`**, not `origin`:
+
+```bash
+git -C ~/.clipwright/live-src remote rename origin upstream   # only if origin is CLIPWRIGHT_PLAN
+git -C ~/.clipwright/live-src remote add origin <clipwright-grok url>
+```
+
+`deploy REF` fetches one remote and detaches `live-src` at `REF` (a branch
+name prefers `<remote>/REF`), then restarts the daemon and prints status,
+including `remote: <name> <url>`. A remote whose URL ends with
+`clipwright-grok` is used instead of `origin` when both exist, so a leftover
+`origin` pointing at `CLIPWRIGHT_PLAN` cannot check out the old plan commit.
+If the remote that would be fetched is named `CLIPWRIGHT_PLAN`, `deploy`
+exits 2 unless `--force-remote`. `--remote NAME` or `$CLIPWRIGHT_OPS_REMOTE`
+picks the remote by name (`CLIPWRIGHT_OPS_REMOTE=origin` forces origin, and
+still refuses a plan URL without `--force-remote`). A dirty tree is refused
+unless `--force`, which discards tracked edits and leaves untracked files
+alone. Put `bot.env` in the state directory, not inside `live-src`.
 
 `restart` sends SIGTERM to the pid that holds `daemon.pid`, waits until the
 lock is free (up to a few minutes, so an in-flight render can finish), then
