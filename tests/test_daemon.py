@@ -503,7 +503,7 @@ def test_group_gif_from_a_guest_downloads_probes_and_previews_as_a_reply(daemon,
     assert sess.message_id == 101                  # the preview lives in the group message
     rows = keyboard_of(sent["reply_markup"])
     assert [b["text"] for b in rows[0]] == recipe_switch_row("gifify")
-    assert [b["text"] for b in rows[1]] == ["🃏 typecard"]
+    assert [b["text"] for b in rows[1]] == ["⏩ speed", "🃏 typecard"]
     assert [b["text"] for b in rows[-1]] == ["↩ Undo", "⌘ Show CLI", "⬇ Export", "🎲 Grid"]
     assert all(decode_cb(b["callback_data"]).session == token for row in rows for b in row)
     assert api.texts() == []
@@ -1060,7 +1060,7 @@ def test_preview_keyboard_is_complete_and_small(daemon, api):
     assert all(len(b["callback_data"].encode()) <= MAX_CB_BYTES for b in flat)
     assert all(decode_cb(b["callback_data"]).session == token for b in flat)
     assert [b["text"] for b in rows[0]] == recipe_switch_row("gifify")
-    assert [b["text"] for b in rows[1]] == ["🃏 typecard"]
+    assert [b["text"] for b in rows[1]] == ["⏩ speed", "🃏 typecard"]
     assert [b["text"] for b in rows[-1]] == ["↩ Undo", "⌘ Show CLI", "⬇ Export", "🎲 Grid"]
     assert any(b["text"] == "• 🔁 Seamless" for b in flat)
 

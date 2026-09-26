@@ -110,8 +110,10 @@ def run(argv: list[str], *, log: list|None = None, timeout=600) -> subprocess.Co
 def probe(path) -> Probe             # ffprobe -print_format json; raises FFmpegError if not video/still
 def is_still(probe) -> bool
 def even(n) -> int
-def gif_argv(src, out, *, fps, width, colors, from_s=None, to_s=None, overlay_png=None, overlay_pos="bottom", reverse_append=False, dither="bayer") -> list[str]
-def mp4_argv(src, out, *, fps, width, from_s=None, to_s=None, overlay_png=None, overlay_pos="bottom", reverse_append=False) -> list[str]
+def gif_argv(src, out, *, fps, width, colors, from_s=None, to_s=None, overlay_png=None, overlay_pos="bottom", reverse_append=False, dither="bayer", rate=None, rate_end=None, rate_span=None) -> list[str]
+def mp4_argv(src, out, *, fps, width, from_s=None, to_s=None, overlay_png=None, overlay_pos="bottom", reverse_append=False, rate=None, rate_end=None, rate_span=None) -> list[str]
+def rate_setpts(rate, rate_end=None, rate_span=None) -> str   # PTS/rate, or the linear-ramp integral; numbers only
+def playback_seconds(duration_s, start, end) -> float        # output seconds for that rate change
 def still_hold_argv(src, out, *, width, fps, duration_s) -> list[str]   # -loop 1 hold of a still
 def kenburns_argv(src, out, *, width, height, fps, duration_s, zoom=1.4) -> list[str]  # zoompan; numbers only
 def first_frame_argv(src, out) -> list[str]
@@ -123,6 +125,13 @@ GIF encode is palettegen/paletteuse in one command via `split` (that is the
 `reverse_append=True` yields the boomerang (`split[a][b];[b]reverse[r];[a][r]concat`).
 Trim uses `-ss`/`-to` as input options, positioned before `-i`. Overlay uses
 `[0:v][1:v]overlay=0:main_h-overlay_h` (bottom) or `overlay=0:0` (top).
+Optional `rate` / `rate_end` / `rate_span` prepend a `setpts` built only from
+those numbers and the ffmpeg variables `PTS`, `T`, `STARTT`, and `TB`. `rate`
+alone is a constant playback rate (`PTS/rate`: 2 plays the trim in half the
+time). A different `rate_end` is a linear ramp of playback rate across
+`rate_span` source seconds; `setpts` is the integral `D/(r1-r0)*ln(r(t)/r0)`
+with `t = T-STARTT`, applied before `fps` so the ramp is sampled in output
+time. `playback_seconds` is that integral's total.
 
 ## `clipwright/caption.py`
 
@@ -160,8 +169,8 @@ def sample_frames(path, from_s, to_s, *, fps=10, width=64) -> list[Image]    # f
 ```python
 @dataclass class CookContext: workdir, out_dir, stem, proxy: bool = False, log: list = field(default_factory=list)
 @dataclass class CookResult: gif: str|None, mp4: str|None, report: dict, argv_log: list[list[str]]
-def run(inst: dict, ctx: CookContext) -> CookResult     # one per module: gifify.py, caption_loop.py, boomerang.py, ken_burns.py, typecard.py
-PIPELINES = {"gifify": ..., "caption_loop": ..., "boomerang": ..., "ken_burns": ..., "typecard": ...}
+def run(inst: dict, ctx: CookContext) -> CookResult     # one per module: gifify.py, caption_loop.py, boomerang.py, ken_burns.py, typecard.py, speed.py
+PIPELINES = {"gifify": ..., "caption_loop": ..., "boomerang": ..., "ken_burns": ..., "typecard": ..., "speed": ...}
 ```
 Proxy mode renders a small (≤ 240 px wide) MP4 fast for previews and skips the
 GIF budget search. Full mode: build the ladder, `budget.solve`, then `squeeze`,
@@ -172,6 +181,20 @@ and also write an MP4 preview. Both modes work on at most `SEGMENT_CAP_S`
 cut to the cap), `loop` (the honest label: `seamless`, `boomerang
 (degraded)`, `none (crossfade not implemented)` ...), and `loop_score` plus
 `loop_nudge_frames` whenever the loop finder ran.
+
+`speed` (recipe `speed`) is a gifify sibling: no caption, and the loop policy
+is fixed at `none` (the GIF file still loops; the trim is not seam-nudged or
+reversed, so the ramp is measured on the trim the user set). Knobs: `mode`
+(`fixed` | `ramp`, default `fixed`), `rate` (`0.5`, `0.75`, `1.5`, `2`, `3`,
+`4`, default `2`), `ramp` (`slow_fast` | `fast_slow`, default `slow_fast`;
+only changes the render when `mode = ramp`), plus gifify's `fps`, `width`,
+`colors`, `fits`, and `trim`. Fixed mode plays the whole trim at `rate`.
+Ramp mode keeps one end at 1× and the other at `rate`: `slow_fast` is 1× →
+rate, `fast_slow` is rate → 1×. The pipeline passes that numeric pair to
+`cook_clip(..., speed=(start, end))`, which uses the `setpts` above and then
+the usual budget ladder and gifsicle squeeze. `report["duration"]` is
+playback time after the speed change. The report also carries `mode`, `rate`,
+and `ramp` (`None` when mode is fixed).
 
 ## `clipwright/cook.py`
 

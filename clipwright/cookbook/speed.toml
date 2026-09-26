@@ -1,0 +1,70 @@
+# speed — play a trim faster, slower, or ramped, then fit it as a GIF.
+name        = "speed"
+blurb       = "Play the trim faster, slower, or ramped."
+emoji       = "⏩"
+pipeline    = "speed"
+needs_input = true
+
+[[knob]]
+key     = "mode"
+label   = "Mode"
+type    = "enum"
+values  = ["fixed", "ramp"]
+labels  = ["Fixed", "Ramp"]
+default = "fixed"
+
+[[knob]]
+key     = "rate"
+label   = "Rate"
+type    = "enum"
+values  = [0.5, 0.75, 1.5, 2, 3, 4]
+labels  = ["0.5×", "0.75×", "1.5×", "2×", "3×", "4×"]
+default = 2
+
+[[knob]]
+key     = "ramp"
+label   = "Ramp"
+type    = "enum"
+values  = ["slow_fast", "fast_slow"]
+labels  = ["Slow → fast", "Fast → slow"]
+default = "slow_fast"
+
+[[knob]]
+key     = "fps"
+label   = "FPS"
+type    = "step"
+min     = 8
+max     = 30
+step    = 2
+default = 15
+
+[[knob]]
+key     = "width"
+label   = "Width"
+type    = "step"
+min     = 240
+max     = 640
+step    = 40
+default = 480
+
+[[knob]]
+key     = "colors"
+label   = "Colours"
+type    = "enum"
+values  = [64, 128, 256]
+labels  = ["64 · tiny", "128 · balanced", "256 · full"]
+default = 256
+
+[[knob]]
+key     = "fits"
+label   = "Fits"
+type    = "enum"
+values  = ["telegram", "discord", "slack"]
+labels  = ["✈️ Telegram", "🎮 Discord", "💼 Slack"]
+default = "telegram"
+
+[[knob]]
+key    = "trim"
+label  = "Trim"
+type   = "range"
+step_s = 0.1

@@ -353,6 +353,43 @@ def test_gif_argv_non_bayer_dither_has_no_bayer_scale():
     assert "bayer_scale" not in graph
 
 
+def test_rate_setpts_is_numbers_and_the_ramp_integral():
+    import math
+    import re
+    assert F.rate_setpts(2) == "PTS/2"
+    assert F.rate_setpts(0.5) == "PTS/0.5"
+    assert F.rate_setpts(2, 2, 3) == "PTS/2"
+    assert F.rate_setpts(1, 4, 3) == "log((1+(4-1)*(T-STARTT)/3)/1)*3/((4-1)*TB)"
+    assert F.rate_setpts(4, 1, 3) == "log((4+(1-4)*(T-STARTT)/3)/4)*3/((1-4)*TB)"
+    for expr in (F.rate_setpts(2), F.rate_setpts(0.75, 1, 2.5), F.rate_setpts(4, 0.5, 3)):
+        assert re.fullmatch(r"[0-9PTSlog.+\-*/()TBSTART]+", expr)
+        assert "," not in expr and ";" not in expr and " " not in expr
+    assert F.playback_seconds(3, 2, 2) == pytest.approx(1.5)
+    assert F.playback_seconds(3, 0.5, 0.5) == pytest.approx(6.0)
+    assert F.playback_seconds(3, 1, 4) == pytest.approx(math.log(4))
+    assert F.playback_seconds(3, 4, 1) == pytest.approx(math.log(4))
+    assert F.playback_seconds(3, 1, 2) == pytest.approx(3 * math.log(2))
+    for bad in (0, -2, float("nan"), float("inf"), True, "2"):
+        with pytest.raises(ValueError):
+            F.rate_setpts(bad)
+    with pytest.raises(ValueError, match="rate_span"):
+        F.rate_setpts(1, 4)
+    with pytest.raises(ValueError, match="rate"):
+        F.gif_argv("in.mp4", "out.gif", fps=10, width=200, colors=32, rate_end=2)
+
+
+def test_gif_and_mp4_argv_prepend_setpts_before_fps():
+    fixed = F.gif_argv("in.mp4", "out.gif", fps=12, width=320, colors=64, rate=2)
+    graph = fixed[fixed.index("-filter_complex") + 1]
+    assert graph.startswith("[0:v]setpts=PTS/2,fps=12,scale=320:-2:flags=lanczos[v]")
+    assert "palettegen" in graph and "in.mp4" not in graph
+    ramp = F.mp4_argv("in.mp4", "out.mp4", fps=15, width=240, rate=1, rate_end=4, rate_span=3)
+    mp4_graph = ramp[ramp.index("-filter_complex") + 1]
+    assert mp4_graph.startswith("[0:v]setpts=" + F.rate_setpts(1, 4, 3) + ",fps=15,scale=240:-2")
+    untouched = F.gif_argv("in.mp4", "out.gif", fps=12, width=320, colors=64)
+    assert "setpts" not in untouched[untouched.index("-filter_complex") + 1]
+
+
 def test_mp4_argv_shape():
     argv = F.mp4_argv("in.mp4", "out.mp4", fps=15, width=241, from_s=0.5, to_s=2.0)
     assert argv[0] == "ffmpeg" and argv[-1] == "out.mp4"
@@ -394,6 +431,26 @@ def test_gif_encode_trim_is_shorter(test_clip, tmp_out, plain_gif):
     assert abs(frame_count(out) - FPS) <= 1
     assert frame_count(out) < frame_count(plain_gif)
     assert F.probe(out).duration < F.probe(plain_gif).duration
+
+
+def test_gif_encode_fixed_rate_and_ramp_change_duration(test_clip, tmp_path, plain_gif):
+    """2× shortens, 0.5× lengthens, and a 1×→4× ramp matches the integral."""
+    src = F.probe(test_clip).duration
+
+    def encode(name, **kw):
+        out = str(tmp_path / name)
+        F.run(F.gif_argv(test_clip, out, fps=FPS, width=WIDTH, colors=64, **kw))
+        assert_gif(out)
+        return F.probe(out).duration
+
+    fast = encode("fast.gif", rate=2)
+    slow = encode("slow.gif", rate=0.5)
+    ramp = encode("ramp.gif", rate=1, rate_end=4, rate_span=src)
+    plain = F.probe(plain_gif).duration
+    assert fast == pytest.approx(src / 2, abs=0.2) and fast < plain
+    assert slow == pytest.approx(src / 0.5, abs=0.25) and slow > plain
+    assert ramp == pytest.approx(F.playback_seconds(src, 1, 4), abs=0.2)
+    assert ramp < fast * 1.2  # 1×→4× finishes sooner than a flat 2×
 
 
 def test_gif_encode_boomerang_doubles_frames(test_clip, tmp_out, plain_gif):

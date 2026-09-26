@@ -14,7 +14,9 @@ Rules enforced here:
   JSON itself.
 - Filtergraph strings are assembled ONLY from numbers and fixed tokens. No
   caller-supplied text ever enters a filter: captions arrive as a PNG path
-  (a separate `-i` input) and are composited with `overlay`.
+  (a separate `-i` input) and are composited with `overlay`. A speed change
+  is a ``setpts`` expression from ``rate_setpts``: finite rates and a span,
+  plus the ffmpeg variables ``PTS``, ``T``, ``STARTT``, and ``TB``.
 - `probe` validates the input path with `os.path.isfile` before use and is
   the gate every pipeline goes through; the `*_argv` builders are pure. It
   also refuses any container outside CONTAINERS: ffprobe sniffs content, not
@@ -287,6 +289,70 @@ def _seconds(x) -> str:
     return f"{f:.3f}"
 
 
+_RATE_EPS = 1e-9
+
+
+def _positive_number(name: str, value) -> float:
+    """A finite number greater than zero, for a filter operand or a duration."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a positive finite number, not {value!r}")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{name} must be a positive finite number, not {value!r}")
+    return number
+
+
+def rate_setpts(rate, rate_end=None, rate_span=None) -> str:
+    """``setpts`` body for a constant playback rate, or a linear ramp of one.
+
+    ``rate`` alone (or ``rate_end`` equal to it) is ``PTS/<rate>``: the trim
+    plays at that many times normal speed. When the ends differ, playback
+    rate moves linearly from ``rate`` to ``rate_end`` across ``rate_span``
+    source seconds. Output time is the integral of ``dt/rate(t)``,
+
+        D / (r1 - r0) * ln(r(t) / r0)
+
+    with ``t = T - STARTT`` so a trimmed input whose timestamps do not start
+    at zero still ramps across the kept segment. The text is numeric literals
+    and the ffmpeg variables ``PTS``, ``T``, ``STARTT``, and ``TB`` only.
+    """
+    start = _positive_number("rate", rate)
+    end = start if rate_end is None else _positive_number("rate_end", rate_end)
+    if abs(start - end) <= _RATE_EPS:
+        return f"PTS/{_num(start)}"
+    if rate_span is None:
+        raise ValueError("rate_span must be a positive finite number when rate and rate_end differ")
+    span = _positive_number("rate_span", rate_span)
+    start_txt, end_txt, span_txt = _num(start), _num(end), _num(span)
+    return (
+        f"log(({start_txt}+({end_txt}-{start_txt})*(T-STARTT)/{span_txt})/{start_txt})"
+        f"*{span_txt}/(({end_txt}-{start_txt})*TB)"
+    )
+
+
+def playback_seconds(duration_s, start, end) -> float:
+    """Output seconds for ``duration_s`` of source played from ``start``× to ``end``×.
+
+    The closed form of the ramp in ``rate_setpts``. Equal ends divide by the
+    constant rate.
+    """
+    span = _positive_number("duration_s", duration_s)
+    s0 = _positive_number("start", start)
+    s1 = _positive_number("end", end)
+    if abs(s0 - s1) <= _RATE_EPS:
+        return span / s0
+    return span / (s1 - s0) * math.log(s1 / s0)
+
+
+def _speed_setpts(rate, rate_end, rate_span) -> str | None:
+    """``None`` when no speed change was asked for; otherwise ``rate_setpts``."""
+    if rate is None and rate_end is None and rate_span is None:
+        return None
+    if rate is None:
+        raise ValueError("rate is required when rate_end or rate_span is set")
+    return rate_setpts(rate, rate_end, rate_span)
+
+
 def _trim_options(from_s, to_s) -> list[str]:
     """`-ss`/`-to` as INPUT options (placed before `-i`), or [] when untrimmed."""
     if from_s is not None and to_s is not None and float(to_s) <= float(from_s):
@@ -299,17 +365,25 @@ def _trim_options(from_s, to_s) -> list[str]:
     return opts
 
 
-def _frame_chain(*, fps, width, overlay_png, overlay_pos, reverse_append) -> tuple[list[str], str]:
-    """The shared front of a filtergraph: fps, scale, optional overlay, optional boomerang.
+def _frame_chain(*, fps, width, overlay_png, overlay_pos, reverse_append,
+                 rate=None, rate_end=None, rate_span=None) -> tuple[list[str], str]:
+    """The shared front of a filtergraph: optional setpts, fps, scale, overlay, boomerang.
 
-    Returns (extra input args, graph text ending in the pad `[v]`).
+    Returns (extra input args, graph text ending in the pad `[v]`). ``setpts``
+    comes before ``fps`` so a ramp is sampled evenly in output time.
     """
     if overlay_pos not in OVERLAY_POSITIONS:
         raise ValueError(f"overlay_pos must be one of {sorted(OVERLAY_POSITIONS)}, not {overlay_pos!r}")
     if float(fps) <= 0:
         raise ValueError(f"fps must be positive, not {fps!r}")
     inputs: list[str] = []
-    parts = [f"[0:v]fps={_num(fps)},scale={even(width)}:-2:flags=lanczos[v]"]
+    filters = []
+    setpts = _speed_setpts(rate, rate_end, rate_span)
+    if setpts is not None:
+        filters.append(f"setpts={setpts}")
+    filters.append(f"fps={_num(fps)}")
+    filters.append(f"scale={even(width)}:-2:flags=lanczos")
+    parts = ["[0:v]" + ",".join(filters) + "[v]"]
     if overlay_png is not None:
         inputs += ["-i", str(overlay_png)]
         parts.append(f"[v][1:v]{OVERLAY_POSITIONS[overlay_pos]}[v]")
@@ -331,15 +405,19 @@ def gif_argv(
     overlay_pos: str = "bottom",
     reverse_append: bool = False,
     dither: str = "bayer",
+    rate=None,
+    rate_end=None,
+    rate_span=None,
 ) -> list[str]:
-    """One ffmpeg command that trims, scales, overlays, boomerangs and palette-encodes a GIF."""
+    """One ffmpeg command that trims, speeds, scales, overlays, boomerangs and palette-encodes a GIF."""
     colors = int(colors)
     if not 2 <= colors <= 256:
         raise ValueError(f"colors must be 2..256, not {colors}")
     if dither not in DITHERS:
         raise ValueError(f"dither must be one of {sorted(DITHERS)}, not {dither!r}")
     inputs, chain = _frame_chain(
-        fps=fps, width=width, overlay_png=overlay_png, overlay_pos=overlay_pos, reverse_append=reverse_append
+        fps=fps, width=width, overlay_png=overlay_png, overlay_pos=overlay_pos,
+        reverse_append=reverse_append, rate=rate, rate_end=rate_end, rate_span=rate_span,
     )
     use = f"paletteuse=dither={dither}" + (":bayer_scale=5" if dither == "bayer" else "") + ":diff_mode=rectangle"
     graph = (
@@ -367,10 +445,14 @@ def mp4_argv(
     overlay_png: str | None = None,
     overlay_pos: str = "bottom",
     reverse_append: bool = False,
+    rate=None,
+    rate_end=None,
+    rate_span=None,
 ) -> list[str]:
     """One ffmpeg command for the H.264 preview: same frame chain, x264 veryfast, faststart, no audio."""
     inputs, chain = _frame_chain(
-        fps=fps, width=width, overlay_png=overlay_png, overlay_pos=overlay_pos, reverse_append=reverse_append
+        fps=fps, width=width, overlay_png=overlay_png, overlay_pos=overlay_pos,
+        reverse_append=reverse_append, rate=rate, rate_end=rate_end, rate_span=rate_span,
     )
     return (
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]

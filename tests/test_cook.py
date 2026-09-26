@@ -1,8 +1,9 @@
-"""Tests for clipwright.cook and the clip pipelines (gifify, caption_loop, boomerang).
+"""Tests for clipwright.cook and the clip pipelines (gifify, caption_loop, boomerang, speed).
 
 Renders are shared through module-scoped fixtures so each pipeline cooks once;
 the whole file stays well under the 40 s budget.
 """
+import math
 import os
 import shlex
 import re
@@ -588,6 +589,118 @@ def test_cook_gifify_accepts_a_still(book, test_still, tmp_out):
     result = cook(inst, out_dir=tmp_out, proxy=True, cookbook=book)
     assert result.mp4 and os.path.isfile(result.mp4)
     assert result.report["duration"] == pytest.approx(common.STILL_HOLD_S, abs=0.2)
+
+
+def _filter_graphs(result) -> list[str]:
+    graphs = []
+    for argv in result.argv_log:
+        if "-filter_complex" in argv:
+            graphs.append(argv[argv.index("-filter_complex") + 1])
+    return graphs
+
+
+def _gif_frame(path: str, index: int) -> Image.Image:
+    im = Image.open(path)
+    im.seek(index)
+    return im.convert("L")
+
+
+def _source_time(output_t: float, span: float, start: float, end: float) -> float:
+    """Source time whose playback timestamp is ``output_t`` under a linear rate ramp."""
+    if abs(end - start) < 1e-9:
+        return output_t * start
+    speed = start * math.exp(output_t * (end - start) / span)
+    return span * (speed - start) / (end - start)
+
+
+def _source_gray(clip: str, t: float, size: tuple[int, int], dest: str) -> Image.Image:
+    ffmpeg.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{t:.3f}", "-i", clip, "-frames:v", "1",
+        "-vf", f"scale={size[0]}:{size[1]}", dest,
+    ])
+    return Image.open(dest).convert("L")
+
+
+@pytest.fixture(scope="module")
+def speed_fixed(book, test_clip, out_root):
+    inst = _inst(book, "speed", test_clip)
+    return inst, cook(inst, out_dir=str(out_root / "speed-fixed"), cookbook=book)
+
+
+@pytest.fixture(scope="module")
+def speed_ramp(book, test_clip, out_root):
+    inst = _inst(book, "speed", test_clip, mode="ramp", rate=4, ramp="slow_fast", colors=64, fps=10)
+    return inst, cook(inst, out_dir=str(out_root / "speed-ramp"), cookbook=book)
+
+
+@pytest.fixture(scope="module")
+def speed_ramp_back(book, test_clip, out_root):
+    inst = _inst(book, "speed", test_clip, mode="ramp", rate=4, ramp="fast_slow", colors=64, fps=10)
+    return inst, cook(inst, out_dir=str(out_root / "speed-ramp-back"), cookbook=book)
+
+
+def test_speed_fixed_cooks_a_shorter_gif(speed_fixed, book):
+    inst, result = speed_fixed
+    assert os.path.isfile(result.gif) and result.gif.endswith(".gif")
+    assert os.path.isfile(result.mp4)
+    with open(result.gif, "rb") as fh:
+        assert fh.read(6) == b"GIF89a"
+    report = result.report
+    assert REPORT_KEYS <= set(report)
+    assert report["mode"] == "fixed" and report["rate"] == 2 and report["ramp"] is None
+    assert report["loop"] == "none" and "loop_score" not in report
+    assert report["fits"] is True and report["attempts"] == 1
+    span = report["to"] - report["from"]
+    assert report["duration"] == pytest.approx(ffmpeg.playback_seconds(span, 2, 2), abs=0.02)
+    assert ffmpeg.probe(result.gif).duration == pytest.approx(report["duration"], abs=0.2)
+    assert ffmpeg.probe(result.mp4).duration == pytest.approx(report["duration"], abs=0.2)
+    assert report["duration"] < span
+    graphs = _filter_graphs(result)
+    assert graphs and all(g.startswith("[0:v]setpts=PTS/2,fps=") for g in graphs)
+    assert all("log(" not in g and inst["input"] not in g for g in graphs)
+    assert not any("rawvideo" in argv for argv in result.argv_log)
+    loaded = recipe.load_instance(report["sidecar"])
+    assert recipe.validate(loaded, book["speed"]) == []
+    assert loaded["mode"] == "fixed" and loaded["rate"] == 2
+    assert report["cli"].startswith("clipwright cook speed ")
+
+
+def test_speed_ramp_cooks_and_directions_differ(speed_ramp, speed_ramp_back, tmp_path):
+    _, slow_fast = speed_ramp
+    _, fast_slow = speed_ramp_back
+    for result, ramp, prefix in (
+        (slow_fast, "slow_fast", "log((1+(4-1)*(T-STARTT)/"),
+        (fast_slow, "fast_slow", "log((4+(1-4)*(T-STARTT)/"),
+    ):
+        report = result.report
+        assert os.path.isfile(result.gif)
+        with open(result.gif, "rb") as fh:
+            assert fh.read(6) == b"GIF89a"
+        assert report["mode"] == "ramp" and report["rate"] == 4 and report["ramp"] == ramp
+        assert report["loop"] == "none"
+        span = report["to"] - report["from"]
+        assert report["duration"] == pytest.approx(ffmpeg.playback_seconds(span, 1, 4), abs=0.02)
+        assert ffmpeg.probe(result.gif).duration == pytest.approx(report["duration"], abs=0.25)
+        graphs = _filter_graphs(result)
+        assert graphs and all(prefix in g and "setpts=" in g for g in graphs)
+        assert all(result.report["ramp"] not in g for g in graphs)
+        assert any(argv[0] == "gifsicle" for argv in result.argv_log)
+    # The integral is the same either way, so the GIFs are the same length.
+    # A frame partway through is closer to the source time that direction
+    # should have reached than to the other direction's source time.
+    assert slow_fast.report["duration"] == pytest.approx(fast_slow.report["duration"], abs=0.02)
+    clip = recipe.load_instance(slow_fast.report["sidecar"])["input"]
+    span = slow_fast.report["to"] - slow_fast.report["from"]
+    index = 6
+    output_t = index / slow_fast.report["fps"]
+    size = _gif_frame(slow_fast.gif, index).size
+    near = _source_gray(clip, _source_time(output_t, span, 1, 4), size, str(tmp_path / "near.png"))
+    far = _source_gray(clip, _source_time(output_t, span, 4, 1), size, str(tmp_path / "far.png"))
+    slow_frame = _gif_frame(slow_fast.gif, index)
+    fast_frame = _gif_frame(fast_slow.gif, index)
+    assert _mean_abs_diff(slow_frame, near) + 2 < _mean_abs_diff(slow_frame, far)
+    assert _mean_abs_diff(fast_frame, far) + 2 < _mean_abs_diff(fast_frame, near)
 
 
 def test_cook_typecard_needs_no_input(book, tmp_out):
