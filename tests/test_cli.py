@@ -58,17 +58,21 @@ def _one_error_line(capsys) -> str:
 
 # --- recipes / probe -----------------------------------------------------------
 
-def test_recipes_lists_five_with_knobs(capsys):
+def test_recipes_lists_each_cookbook_entry(capsys):
     assert main(["recipes"]) == 0
     out = capsys.readouterr().out
     heads = [line for line in _lines(out) if not line.startswith(" ")]
-    assert len(heads) == 5
-    assert [h.split()[1] for h in heads] == ["boomerang", "caption-loop", "gifify", "ken-burns", "typecard"]
+    assert len(heads) == 6
+    assert [h.split()[1] for h in heads] == [
+        "boomerang", "caption-loop", "gifify", "ken-burns", "speed", "typecard"]
     assert all(" — " in h for h in heads)
     knobs = [line for line in _lines(out) if line.startswith("    ")]
     assert any(line.split()[0] == "caption.text" for line in knobs)
     assert any("seamless | boomerang | crossfade | none" in line for line in knobs)
     assert any(line.split()[0] == "zoom" for line in knobs)
+    assert any(line.split()[0] == "mode" and "fixed | ramp" in line for line in knobs)
+    assert any(line.split()[0] == "rate" and "0.5 | 0.75 | 1.5 | 2 | 3 | 4" in line for line in knobs)
+    assert any("slow_fast | fast_slow" in line for line in knobs)
     assert any("needs_input" not in line for line in heads)
 
 
@@ -405,7 +409,8 @@ def test_doctor_required_checks_pass_here(capsys):
     by_name = {c.name: c for c in checks}
     assert by_name["libass"].required is False
     assert by_name["emoji font"].required is False and by_name["bot.env"].required is False
-    assert by_name["cookbook"].detail.startswith("5 recipes:")
+    assert by_name["cookbook"].detail.startswith("6 recipes:")
+    assert "speed" in by_name["cookbook"].detail
     assert by_name["ffmpeg"].detail[0].isdigit() and by_name["gifsicle"].detail[0].isdigit()
     font = by_name["caption font"]
     assert os.path.isfile(font.detail.split(" (")[0])

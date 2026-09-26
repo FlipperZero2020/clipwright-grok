@@ -1,4 +1,4 @@
-"""Shared plumbing for the clip pipelines (gifify, caption_loop, boomerang).
+"""Shared plumbing for the clip pipelines (gifify, caption_loop, boomerang, speed).
 
 Every clip recipe is the same sequence with a different loop policy and an
 optional caption overlay: probe the input, resolve and cap the trimmed
@@ -153,6 +153,7 @@ def cook_clip(
     loop: str,
     overlay: Overlay = no_overlay,
     overlay_pos: str = "bottom",
+    speed: tuple[float, float] | None = None,
 ) -> CookResult:
     """Render ``inst`` with the given loop policy; proxy or full per ``ctx.proxy``.
 
@@ -160,6 +161,12 @@ def cook_clip(
     gets rendered (each ladder rung may differ), so it should cache per width;
     ``height`` is the frame height at that width, the bound the band must
     respect so ``overlay`` never composites it partly off-frame.
+
+    ``speed``, when set, is ``(start_rate, end_rate)`` across the rendered
+    source span: equal ends are a constant playback rate, otherwise a linear
+    ramp. The numbers are forwarded to the argv builders (``setpts`` before
+    ``fps``). ``report["duration"]`` is playback time after that change,
+    doubled when the loop plan boomerangs.
     """
     src = inst.get("input")
     if not isinstance(src, str) or not src:
@@ -177,12 +184,23 @@ def cook_clip(
 
     frame = {"from_s": plan.from_s, "to_s": plan.to_s,
              "overlay_pos": overlay_pos, "reverse_append": plan.reverse}
+    span = plan.to_s - plan.from_s
+    copies = 2 if plan.reverse else 1
+    if speed is None:
+        played = span * copies
+    else:
+        if not isinstance(speed, tuple) or len(speed) != 2:
+            raise RecipeError(f"speed must be (start_rate, end_rate), not {speed!r}")
+        played = ffmpeg.playback_seconds(span, speed[0], speed[1]) * copies
+        frame["rate"] = speed[0]
+        frame["rate_end"] = speed[1]
+        frame["rate_span"] = span
     report: dict = {
         "proxy": ctx.proxy,
         "from": round(plan.from_s, 3),
         "to": round(plan.to_s, 3),
         "capped": seg.capped,
-        "duration": round((plan.to_s - plan.from_s) * (2 if plan.reverse else 1), 3),
+        "duration": round(played, 3),
         "loop": plan.label,
         "budget": limit,
     }

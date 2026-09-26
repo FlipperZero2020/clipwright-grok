@@ -15,6 +15,7 @@ EXPECTED = {
     "boomerang": ("boomerang", True),
     "ken-burns": ("ken_burns", True),
     "typecard": ("typecard", False),
+    "speed": ("speed", True),
 }
 
 
@@ -77,6 +78,17 @@ def test_cookbook_knob_specifics(book):
     assert c.knobs[knob_index(c, "caption.pos")].values == ["top", "bottom"]
     assert c.knobs[knob_index(c, "trim")].step_s == 0.1
     assert [k.key for k in book["boomerang"].knobs] == ["fps", "width", "fits", "trim"]
+    speed = book["speed"]
+    assert [k.key for k in speed.knobs] == ["mode", "rate", "ramp", "fps", "width", "colors", "fits", "trim"]
+    assert speed.knobs[knob_index(speed, "mode")].values == ["fixed", "ramp"]
+    assert speed.knobs[knob_index(speed, "mode")].default == "fixed"
+    rate = speed.knobs[knob_index(speed, "rate")]
+    assert rate.values == [0.5, 0.75, 1.5, 2, 3, 4] and rate.default == 2
+    assert rate.labels == ["0.5×", "0.75×", "1.5×", "2×", "3×", "4×"]
+    ramp = speed.knobs[knob_index(speed, "ramp")]
+    assert ramp.values == ["slow_fast", "fast_slow"] and ramp.default == "slow_fast"
+    assert speed.knobs[knob_index(speed, "fps")].default == g.knobs[knob_index(g, "fps")].default
+    assert speed.knobs[knob_index(speed, "trim")].step_s == 0.1
 
 
 def test_load_cookbook_rejects_bad_definitions(tmp_path):
@@ -144,6 +156,26 @@ def test_validate_recipe_name_and_scalars(gifify):
     problems = recipe.validate(inst, gifify)
     assert any("seed" in p for p in problems) and any("input" in p for p in problems)
     assert recipe.validate("nope", gifify)
+
+
+def test_speed_defaults_validate_and_bad_enums_do_not(book):
+    defn = book["speed"]
+    inst = recipe.defaults(defn)
+    assert recipe.validate(inst, defn) == []
+    assert inst["mode"] == "fixed" and inst["rate"] == 2 and inst["ramp"] == "slow_fast"
+    inst["rate"] = 1.25
+    assert any("rate" in p for p in recipe.validate(inst, defn))
+    inst = recipe.defaults(defn)
+    inst["mode"] = "zoom"
+    assert any("mode" in p for p in recipe.validate(inst, defn))
+    inst = recipe.defaults(defn)
+    inst["ramp"] = "sideways"
+    assert any("ramp" in p for p in recipe.validate(inst, defn))
+    inst = recipe.defaults(defn)
+    inst["mode"] = "ramp"
+    inst["rate"] = 0.5
+    inst["ramp"] = "fast_slow"
+    assert recipe.validate(inst, defn) == []
 
 
 def test_validate_enum_is_type_strict(gifify):
