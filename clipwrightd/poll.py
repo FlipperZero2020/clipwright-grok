@@ -4,9 +4,13 @@
 ``fcntl.flock`` — a second poller on the same token makes updates vanish, so
 the second one refuses to start), persists the update offset to
 ``<home>/offset`` after every update it has handled (so a restart replays
-at most the one in flight), and dispatches each update to one handler. The
-engine is reached only through ``cook_fn`` / ``probe_fn``, both injectable
-so tests run with fakes and never touch ffmpeg or a socket.
+at most the one in flight), and rewrites that same file after every
+successful ``getUpdates`` — an empty batch keeps the same integer, and a
+daemon that has not seen an update yet leaves the file empty — so its mtime
+is the last poll that returned. ``clipwrightd.ops health`` reads that mtime;
+there is no separate heartbeat file. Each update is dispatched to one
+handler. The engine is reached only through ``cook_fn`` / ``probe_fn``, both
+injectable so tests run with fakes and never touch ffmpeg or a socket.
 
 Flow, per the plan: a photo, video, or ``/gif`` intention arrives → size
 gate → queue and disk-budget gates → *on the render worker*: obtain a
@@ -116,9 +120,12 @@ STALE_BUTTON = "That button is stale."
 CLIP_END = "That's the end of the clip."
 SHUT_DOWN_MID_RENDER = "I was shut down mid-render — send that again in a minute."
 GROUP_OFF = "Group rendering is off in this chat."
-GROUP_START = ("Reply /gif to a photo, a video or a sentence in this chat — or /gif "
-               "some words — and I'll turn it into a GIF you can tune with buttons. "
-               "Bare /gif if you brought nothing. /help for details.")
+GROUP_START = (
+    "This is Clipwright, the fork Grok Bot runs (clipwright-grok). "
+    "Reply /gif to a photo, a video or a sentence in this chat — or /gif "
+    "some words — and I'll turn it into a GIF you can tune with buttons. "
+    "Bare /gif if you brought nothing. /help for details."
+)
 ANON_HINT = "I can't tell anonymous admins or channels apart — send /gif as yourself."
 NAG_COOLDOWN_S = 60.0        # a guest's hints and refusals in a group: one of each per minute, the rest logged
 USERNAME_RETRY_S = 60.0      # how often a failed startup getMe is retried when a /cmd@name needs it
@@ -139,14 +146,16 @@ _EXT_FOR_MIME = {
 STILL_MAX_DIM = 8192         # photos are scaled down at cook time; refuse only the absurd
 
 COMMANDS = [
-    {"command": "start", "description": "What this bot does"},
-    {"command": "help", "description": "How to use it"},
-    {"command": "recipes", "description": "List the cookbook"},
-    {"command": "remix", "description": "Reply to a GIF I sent to reopen its knobs"},
+    {"command": "start", "description": "What Grok Bot's Clipwright fork does"},
+    {"command": "help", "description": "How to use this Clipwright bot"},
+    {"command": "recipes", "description": "List the Clipwright cookbook"},
+    {"command": "remix", "description": "Reply to a GIF this bot sent to reopen its knobs"},
     {"command": "gif", "description": "GIF a photo, video, or some words (or reply to one)"},
 ]
 
 HELP_TEXT = (
+    "I'm Clipwright — the GIF foundry Grok Bot runs and keeps alive "
+    "(the clipwright-grok fork). "
     "Send a photo or a video, or /gif some words, and I turn it into a looping GIF "
     "you tune with buttons.\n\n"
     "• /gif is the front door: reply to a photo, a video or a sentence, or /gif dog.\n"
@@ -455,6 +464,22 @@ class Daemon:
             fh.write(f"{self.offset}\n")
         os.replace(tmp, self.offset_path)
 
+    def note_poll(self) -> None:
+        """Refresh ``<home>/offset`` after ``getUpdates`` returns.
+
+        The integer in the file stays the next update id. An empty batch
+        rewrites that same integer. A daemon that has not seen an update yet
+        leaves the file empty, which ``load_offset`` still reads as None.
+        The ops health check treats this file's mtime as the last successful
+        poll — the same state the daemon already keeps, not a new metric.
+        """
+        if self.offset is not None:
+            self.save_offset()
+            return
+        with open(self.offset_path, "a", encoding="utf-8"):
+            pass
+        os.utime(self.offset_path, None)
+
     # -- the loop ------------------------------------------------------------
 
     def run(self, once: bool = False) -> int:
@@ -468,7 +493,8 @@ class Daemon:
         self.acquire_pidfile()
         self.offset = self.load_offset()
         backoff = BACKOFF_MIN_S
-        log.info("clipwrightd polling from offset %s (home %s)", self.offset, self.home)
+        log.info("clipwrightd (clipwright-grok) polling from offset %s (home %s)",
+                 self.offset, self.home)
         try:
             self.username = self._bot_username()    # inside the try: a Ctrl-C during a hung getMe still exits cleanly
             self._maybe_sweep()
@@ -495,6 +521,7 @@ class Daemon:
                     self.handle_update(update)
                     self.offset = int(update["update_id"]) + 1
                     self.save_offset()          # per update: an interrupted batch replays only the one in flight
+                self.note_poll()            # empty batches too: offset mtime is the last poll that returned
                 self._maybe_sweep()
                 if once:
                     return 0
@@ -833,7 +860,8 @@ class Daemon:
                          args=_command_args(raw if isinstance(raw, str) else ""))
         elif command == "start":
             self._nag(chat_id, uid, GROUP_START if group else (
-                f"Hi! Send a photo or a video (up to {_mb(self.config.max_upload_bytes)}, "
+                "Hi! This is Clipwright, the fork Grok Bot runs (clipwright-grok). "
+                f"Send a photo or a video (up to {_mb(self.config.max_upload_bytes)}, "
                 f"{self.config.max_duration_s:.0f} s), or /gif some words, and I'll turn it "
                 "into a looping GIF you can tune with buttons. /help for the details."), origin, guest)
         elif command == "help":
@@ -1523,7 +1551,7 @@ def main(argv: list[str] | None = None) -> int:
     """``python3 -m clipwrightd [--home DIR] [--once]``."""
     parser = argparse.ArgumentParser(
         prog="clipwrightd",
-        description="Clipwright's Telegram front door: long-polls the Bot API and renders on request.")
+        description="Grok Bot's Clipwright fork (clipwright-grok): long-polls the Bot API and renders on request.")
     parser.add_argument("--home", help="state directory holding bot.env (default: $CLIPWRIGHT_HOME or ~/.clipwright)")
     parser.add_argument("--once", action="store_true", help="handle one batch of updates, then exit")
     args = parser.parse_args(argv)

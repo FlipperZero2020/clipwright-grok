@@ -469,6 +469,7 @@ def test_start_help_recipes_reply(daemon, api):
     daemon.handle_update(msg("/bogus"))
     start, help_, recipes, bogus = api.texts()
     assert "Send a photo" in start and "1.0 MB" in start and "10 s" in start
+    assert "Grok Bot" in start and "clipwright-grok" in start
     assert "/remix" in help_ and f"{SEGMENT_CAP_S:g} s" in help_
     assert "gifify" in recipes and "caption-loop" in recipes
     assert "/bogus" in bogus
@@ -860,11 +861,14 @@ def test_group_start_help_recipes_reply_to_the_asker(daemon, api):
         daemon.handle_update(update)
     start, help_, recipes = api.of("sendMessage")
     assert start["text"] == GROUP_START and "/gif" in GROUP_START
+    assert "Grok Bot" in GROUP_START and "clipwright-grok" in GROUP_START
     assert help_["text"] == HELP_TEXT and "In groups" in HELP_TEXT and "/gif" in HELP_TEXT
+    assert "Grok Bot" in HELP_TEXT and "clipwright-grok" in HELP_TEXT
     assert "gifify" in recipes["text"] and "caption-loop" in recipes["text"]
     assert [kw["chat_id"] for kw in api.of("sendMessage")] == [GROUP] * 3
     assert [kw["reply_to_message_id"] for kw in api.of("sendMessage")] == [u["message"]["message_id"] for u in asks]
     assert {"command": "gif", "description": "GIF a photo, video, or some words (or reply to one)"} in COMMANDS
+    assert {"command": "start", "description": "What Grok Bot's Clipwright fork does"} in COMMANDS
 
 
 def test_everything_a_group_session_sends_replies_to_its_gif(daemon, api, store, cook, probe):
@@ -1669,6 +1673,30 @@ def test_run_once_handles_a_batch_and_persists_offset(daemon, api, home):
     api.batches = [[]]
     assert daemon.run(once=True) == 0
     assert api.of("getUpdates")[-1] == {"offset": expected, "timeout": 50}
+
+
+def test_empty_poll_refreshes_offset_mtime_without_changing_the_integer(daemon, api, home):
+    """An empty getUpdates still rewrites offset so its mtime is the last poll that returned."""
+    api.batches = [[msg("/start")]]
+    assert daemon.run(once=True) == 0
+    path = os.path.join(home, "offset")
+    stored = int(open(path, encoding="utf-8").read())
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+    api.batches = [[]]
+    assert daemon.run(once=True) == 0
+    assert int(open(path, encoding="utf-8").read()) == stored
+    assert os.stat(path).st_mtime > time.time() - 30
+    assert not os.path.exists(path + ".tmp")
+
+
+def test_first_poll_with_no_updates_leaves_an_empty_offset_file(daemon, api, home):
+    api.batches = [[]]
+    assert daemon.run(once=True) == 0
+    path = os.path.join(home, "offset")
+    assert os.path.isfile(path)
+    assert open(path, encoding="utf-8").read().strip() == ""
+    assert daemon.load_offset() is None
 
 
 def test_offset_is_saved_per_update_so_an_interrupted_batch_replays_only_the_one_in_flight(

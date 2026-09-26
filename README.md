@@ -1,22 +1,100 @@
-# Clipwright
+# Clipwright (clipwright-grok)
 
-Two things live in this repo:
+This is **Grok Bot's fork** of Clipwright. The engine keeps the product name
+**Clipwright**: a $0-per-render GIF/video foundry (ffmpeg + Pillow, no LLM in
+the render loop). The Telegram bot and these operator docs are the fork —
+**clipwright-grok** — the copy Grok Bot runs and keeps alive. They are not
+the upstream [CLIPWRIGHT_PLAN.md](CLIPWRIGHT_PLAN.md) plan dump (that file is
+intent; [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md) is the contract).
+The live @username is whatever you registered with BotFather. These docs say
+**your bot** and do not invent a handle.
 
-1. **The Clipwright engine and its Telegram daemon** — the $0-per-render GIF/video foundry
-   that [CLIPWRIGHT_PLAN.md](CLIPWRIGHT_PLAN.md) describes (ffmpeg + Pillow, no LLM in the
-   render loop). **This now exists as code.** Milestone 1 is done (`clipwright cook` with the
-   gifify, caption-loop and boomerang pipelines, two-pass palette GIFs, the Pillow caption
-   card, `clipwright doctor`), and so are the keyboard, session, Bot API and daemon parts of
-   Milestone 2 (the button loop, in-place preview swapping, export with sidecar, `/remix`).
-   Not built yet: the `[🎲 Grid]` contact sheet, the crossfade loop, and the remaining
-   generative recipes (emoji physics, gradient loops). `typecard` (kinetic caption
-   card, `needs_input = false`) and `ken-burns` (zoom-pan over a still) shipped with
-   the `/gif` seed front door. [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md) is the binding module
-   contract; the plan is the intent. ([CLIPWRIGHT_PLAN_v1_claude-code-skill.md](CLIPWRIGHT_PLAN_v1_claude-code-skill.md)
+## Seed `/gif`
+
+`/gif` obtains a seed, then opens the same recipe / knob / preview / export
+foundry:
+
+- Reply to a **photo** (or image document) → Ken Burns (`ken-burns`).
+- Reply to a **video** or animation → gifify.
+- Reply to a **text** message, or `/gif dog` → a Wikimedia Commons still
+  (then Ken Burns), or a local typecard if the fetch fails.
+- Bare `/gif` → a self-aware "missing argument" typecard. It answers; it
+  does not crash or stay silent.
+
+In a DM, a photo or video with no command opens the same keyboard. In a
+group or channel, only `/gif` and the other commands start work.
+
+## Operators (Grok Bot)
+
+State lives in `$CLIPWRIGHT_HOME` (default `~/.clipwright`): `bot.env`,
+`daemon.pid`, `offset`, `daemon.log`, `state.db`, and a `live-src/` git
+checkout of this fork. The running daemon is **that checkout**, not whatever
+`clipwrightd` happens to be on `PATH`. Restart and verify from here; you do
+not need to read `poll.py`.
+
+One-time, from a clone that already contains `clipwrightd/ops.py`:
+
+```bash
+mkdir -p ~/.clipwright
+git clone <your-remote> ~/.clipwright/live-src   # this fork; no public URL is assumed
+# write ~/.clipwright/bot.env mode 0600 — token and owner id, see below
+python3 -m clipwrightd.ops --home ~/.clipwright deploy main
+python3 -m clipwrightd.ops --home ~/.clipwright health
+```
+
+After a code change:
+
+```bash
+python3 -m clipwrightd.ops deploy <git-ref>    # fetch, detach live-src at that commit, restart, print status
+python3 -m clipwrightd.ops health              # exit 0 only when the pidfile is live and getUpdates is fresh
+python3 -m clipwright doctor                   # toolchain preflight; it does not talk to Telegram
+```
+
+`deploy REF` fetches `origin` when that remote exists, checks `REF` out
+detached in `live-src` (a branch name prefers `origin/<ref>`), restarts the
+daemon, and prints status. A dirty tree is refused unless `--force`, which
+discards tracked edits and leaves untracked files alone. Put `bot.env` in
+the state directory, not inside `live-src`.
+
+`restart` sends SIGTERM to the pid that holds `daemon.pid`, waits until the
+lock is free (up to a few minutes, so an in-flight render can finish), then
+starts `python3 -m clipwrightd --home $CLIPWRIGHT_HOME`
+with that checkout on `PYTHONPATH`. It will not signal a live pid that does
+not hold the flock, and it will not start a second poller while the lock is
+held. SIGTERM is the daemon's Ctrl-C path: an in-flight render is allowed
+to finish. Startup stderr goes to `daemon.out`; the daemon's own log stays
+`daemon.log`.
+
+`status` prints the home, the live-src commit, and the health line, and
+always exits 0. `health` exits 1 when the pidfile is missing, the recorded
+pid is dead, the pid is alive but does not hold the lock, or `getUpdates`
+has not returned within `--max-age` seconds (default 600).
+
+`health` uses state the daemon already writes. `daemon.pid` is the flock.
+`<home>/offset` stores the next update id, and the daemon rewrites it after
+every successful `getUpdates` (the integer does not change on an empty
+batch) so the file's mtime is the last poll that returned. There is no
+separate heartbeat file. A process that just started gets one `--max-age`
+window to finish its first poll. A long poll waits up to 50 seconds and
+errors back off up to 60 seconds, so the default 600 seconds means stuck.
+
+Once installed, the same commands are `clipwright-ops`. `--home DIR` matches
+`clipwrightd --home`.
+
+Two things live in the tree besides the ops layer:
+
+1. **The Clipwright engine and `clipwrightd`.** Milestone 1 is `clipwright cook`
+   (gifify, caption-loop, boomerang, two-pass palette GIFs, the Pillow caption
+   card, `clipwright doctor`). Milestone 2 is the button loop, in-place preview
+   swapping, export with sidecar, and `/remix`. `typecard` and `ken-burns`
+   shipped with the `/gif` seed front door. Not built yet: the `[🎲 Grid]`
+   contact sheet, the crossfade loop, and the remaining generative recipes
+   (emoji physics, gradient loops).
+   ([CLIPWRIGHT_PLAN_v1_claude-code-skill.md](CLIPWRIGHT_PLAN_v1_claude-code-skill.md)
    is the superseded v1.)
-2. **A working render pipeline that already ships GIFs** — the gag-GIF series about a real
-   group chat's coworkers, built from their own verbatim quotes. Standalone scripts, one per
-   episode, sharing three visual "kits". Documented further down.
+2. **The gag-GIF episode scripts** — standalone renders about a real group
+   chat, built from verbatim quotes. This fork does not change them. Documented
+   further down.
 
 ## Clipwright engine
 
@@ -27,7 +105,7 @@ Pillow into a PNG and composited with `overlay`, so it never enters a filtergrap
 ### Install
 
 ```bash
-pip install -e .                 # gives you `clipwright` and `clipwrightd` on PATH
+pip install -e .                 # `clipwright`, `clipwrightd`, and `clipwright-ops` on PATH
 python3 -m clipwright doctor     # or run from the repo root without installing
 ```
 
@@ -177,10 +255,13 @@ clip), or an ffmpeg or gifsicle failure — never a traceback.
 
 ## Telegram daemon
 
-`clipwrightd` is a client of the engine — the same `cook`, driven by buttons. It is stdlib
-only (`urllib` against `api.telegram.org` and, for `/gif <words>`, Wikimedia Commons;
-`sqlite3` for state, one worker thread for renders). Offline still works when the user
-already supplied media or when the local typecard fallback can run.
+`clipwrightd` is Grok Bot's client of the engine — the same `cook`, driven by
+buttons, speaking as the clipwright-grok fork. It is stdlib only (`urllib`
+against `api.telegram.org` and, for `/gif <words>`, Wikimedia Commons;
+`sqlite3` for state, one worker thread for renders). Offline still works when
+the user already supplied media or when the local typecard fallback can run.
+Start, restart, and verify it with `python3 -m clipwrightd.ops` (see
+[Operators](#operators-grok-bot) above).
 
 ### Configure
 
@@ -226,8 +307,11 @@ escapes.
 
 ```bash
 chmod 600 ~/.clipwright/bot.env
-python3 -m clipwrightd            # or `clipwrightd` once installed; --once handles one batch
+python3 -m clipwrightd            # foreground; or use clipwrightd.ops deploy/restart, which daemonizes
 ```
+
+`bot.env` stays in the state directory. `clipwrightd.ops deploy` checks out
+code under `live-src/` and does not read the token.
 
 **Rotate the token first.** The plan pasted a bot token in plaintext (`8108699991:AAG…`), so
 it exists in a chat log; anyone holding it can drive the bot. Revoke it via BotFather
@@ -296,6 +380,7 @@ clipwright/              the engine — pure, importable, knows nothing about Te
   cookbook/*.toml        recipe definitions (gifify, caption-loop, boomerang, ken-burns, typecard)
 clipwrightd/             the bot — a client of the engine
   poll.py                getUpdates loop, pidfile lock, offset persistence, every handler
+  ops.py                 live-src deploy/restart/status/health (pidfile + offset mtime)
   fetch.py               Wikimedia Commons still search for /gif <words> (injectable; mocked in tests)
   keyboards.py           knob spec -> inline keyboard, 64-byte callback encoding
   session.py             SQLite: sessions, undo stack, file ledger, quotas
